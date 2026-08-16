@@ -1,0 +1,64 @@
+"""第 13 章：todo —— 任务清单工具。
+
+对应官方 packages/todo/tool-todo。核心语义（tool-todo/README.zh.md）：
+1. 整体替换：模型每次调用都发送完整列表，不存在部分更新（:5）；
+2. status 三值：pending / in_progress / completed（:11）；
+3. 校验：空/重复 content 拒绝、未知键拒绝（:25）；
+4. 每次调用追加 todo/write 事件（完整列表快照），后写覆盖先写（:9）。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from session import Session
+
+STATUS_PENDING = "pending"
+STATUS_IN_PROGRESS = "in_progress"
+STATUS_COMPLETED = "completed"
+VALID_STATUSES = (STATUS_PENDING, STATUS_IN_PROGRESS, STATUS_COMPLETED)
+
+
+@dataclass(frozen=True)
+class TodoItem:
+    content: str
+    status: str
+
+
+def validate_todos(items: list[TodoItem]) -> list[str]:
+    """校验整个列表（整体替换前的完整检查）。"""
+    errors: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if not item.content.strip():
+            errors.append("content 必须是非空字符串")
+            continue
+        if item.content in seen:
+            errors.append(f'重复的 content: "{item.content}"')
+        seen.add(item.content)
+        if item.status not in VALID_STATUSES:
+            errors.append(
+                f'无效的 status: "{item.status}"（只允许 pending/in_progress/completed）'
+            )
+    return errors
+
+
+def todo_write(session: Session, items: list[TodoItem]) -> str:
+    """整体替换式写入：校验通过后追加 todo/write 事件（完整快照）。
+
+    为什么「整体替换」而不是「单项增删」？官方 :5 说得直白——
+    模型每次调用都发送完整列表。这样日志里的每个 todo/write 事件
+    都是自洽的完整快照，回放时后写覆盖先写，UI 与恢复永远拿到
+    一致状态，不会有「增删了一半」的中间态。"""
+    errors = validate_todos(items)
+    if errors:
+        return "Error: invalid todos: " + "; ".join(errors)
+    snapshot = [{"content": item.content, "status": item.status} for item in items]
+    session.append("todo/write", {"todos": snapshot})
+    pending = sum(1 for item in items if item.status == STATUS_PENDING)
+    in_progress = sum(1 for item in items if item.status == STATUS_IN_PROGRESS)
+    completed = sum(1 for item in items if item.status == STATUS_COMPLETED)
+    return (
+        f"Updated todo list: {pending} pending, {in_progress} in progress, "
+        f"{completed} completed."
+    )
