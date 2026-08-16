@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 200" width="720" height="200">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4d6bfe"/>
+      <stop offset="1" stop-color="#6b3fa0"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="720" height="200" rx="24" fill="#0d1117"/>
+  <!-- plugin puzzle glyph: 4 interlocking modules -->
+  <g stroke="none">
+    <rect x="56" y="56" width="52" height="52" rx="10" fill="url(#g)"/>
+    <rect x="108" y="56" width="24" height="52" fill="url(#g)" opacity="0.55"/>
+    <rect x="56" y="108" width="52" height="24" fill="url(#g)" opacity="0.55"/>
+    <rect x="108" y="108" width="24" height="24" fill="#4d6bfe" opacity="0.9"/>
+    <circle cx="108" cy="82" r="7" fill="#0d1117"/>
+    <circle cx="82" cy="108" r="7" fill="#0d1117"/>
+  </g>
+  <text x="160" y="116" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="52" font-weight="700" fill="#f0f6fc">mini-harness</text>
+  <text x="162" y="156" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" fill="#8b949e">Build DeepSeek Harness from 0 to 1 · 从 0 到 1 手写 DeepSeek Harness</text>
+</svg>
