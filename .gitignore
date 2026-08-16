@@ -1,0 +1,14 @@
+node_modules/
+.venv/
+.pytest_cache/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+.coverage
+__pycache__/
+*.py[cod]
+.env*
+!.env.example
+*.log
+.DS_Store
+session.jsonl
