@@ -1,6 +1,6 @@
 """第 01 章：最小流式 Agent。
 
-这一章你亲手实现三样东西：
+这一章实现三样东西：
 1. `load_api_key()`   —— 从项目根目录的 .env 读 API Key
 2. `Message`          —— 一条不可变的对话消息
 3. `DeepSeekClient`   —— 会「一次说完」(chat) 和「边想边说」(stream) 的模型客户端

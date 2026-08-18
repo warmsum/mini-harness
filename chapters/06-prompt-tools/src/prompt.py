@@ -40,9 +40,9 @@ class PromptAssembler:
     def render(self, variables: dict[str, str] | None = None) -> str:
         """按 order 排序拼接全部段，并替换 {{变量}} 占位符。
 
-        变量机制（官方 :24 的 variable API）的用途：提示词里需要
-        运行时才知道的值——模型名、当前目录、日期。段文本写
-        {{model}}，组装时用真实值替换。
+        变量机制（对应官方 `ctx.systemPrompt.variable`，core/system-prompt
+        文档第 24 行）的用途：提示词里需要运行时才知道的值——模型名、
+        当前目录、日期。段文本写 {{model}}，组装时用真实值替换。
         """
         ordered = sorted(self._sections, key=lambda s: (s.order, s.name))
         text = "\n\n".join(section.text for section in ordered)

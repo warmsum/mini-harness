@@ -1,8 +1,8 @@
-"""第 14 章：Subagent —— 把工作委派给子智能体。
+"""第 14 章：Subagent —— 把工作委派给子 agent。
 
 对应官方 packages/subagent/subagent + tool-subagent。
 教学版的核心决策（第 04 章 4.6 节约定的兑现）：
-子智能体 = 一个独立的运行环境：自己的会话、自己的工具子集，
+子 agent = 一个独立的运行环境：自己的会话、自己的工具子集，
 只看到父 agent 交给它的 task 描述——父对话历史一个字都不带。
 
 两个必须教的点：
@@ -22,7 +22,7 @@ from session import Session
 
 @dataclass(frozen=True)
 class SubagentResult:
-    """子智能体的一次运行结果。
+    """子 agent 的一次运行结果。
 
     对应官方 SubagentRun.result → { output, stopReason }：
     只有正常完成才返回 output；失败路径保留已生成的部分文本。"""
@@ -37,11 +37,11 @@ def run_subagent(
     system_prompt: str,
     max_turns: int = 3,
 ) -> SubagentResult:
-    """运行一个子智能体：独立的 Session，只见 task，不见父历史。
+    """运行一个子 agent：独立的 Session，只见 task，不见父历史。
 
     上下文隔离是这里的关键——父 agent 的对话历史可能有几万 token，
     而一个子任务往往只需要一句 task 描述。把历史挡在门外，
-    每个子 agent 的输入都从零开始（官方 fork 是例外，第 14.6 节）。"""
+    每个子 agent 的输入都从零开始（官方 fork 是例外，见本章对照表）。"""
     session = Session()
     session.append("turn/start", {"turn": 1})
     session.append("user/message", {"content": task})
@@ -68,8 +68,8 @@ def run_subagent(
             stop_reason="max_turns",
         )
     except Exception as error:
-        # 失败保留部分文本（官方 :11「被截断的回答不会被报告为成功，
-        # 也绝不会被悄悄丢弃」）
+        # 失败保留部分文本（官方文档第 11 行：被截断的回答不会被报告为成功，
+        # 也绝不会被悄悄丢弃）
         return SubagentResult(output=partial, stop_reason=f"error: {error}")
 
 
@@ -77,7 +77,7 @@ def run_subagents_parallel(
     specs: list[tuple[str, str]],  # (task, system_prompt)
     client: DeepSeekClient,
 ) -> list[SubagentResult]:
-    """并行运行多个子智能体。
+    """并行运行多个子 agent。
 
     DeepSeekClient.chat 是同步阻塞调用（等待网络），用线程池并行——
     多个子任务同时跑，总耗时 ≈ 最慢的那个，而不是逐个相加。
@@ -96,8 +96,8 @@ def create_subagent_tool(
 ) -> dict[str, Any]:
     """把 run_subagent 包装成第 02 章风格的 Tool。
 
-    官方把「委派」做成一个真正的模型工具（tool-subagent :5
-    「基于一个已配置提供方、面向模型的委派工具」）——模型在需要
+    官方把「委派」做成一个真正的模型工具（tool-subagent 文档
+    第 5 行：基于一个已配置提供方、面向模型的委派工具）——模型在需要
     拆分任务时主动调用它，参数就是子任务描述。"""
     from client import Tool
 
@@ -111,8 +111,8 @@ def create_subagent_tool(
     return Tool(
         name="subagent",
         description=(
-            "把一个独立的子任务委派给子智能体执行并等待其完成。"
-            "子智能体看不到当前对话历史，只看到 task 描述。"
+            "把一个独立的子任务委派给子 agent 执行并等待其完成。"
+            "子 agent 看不到当前对话历史，只看到 task 描述。"
             "适合：独立的小任务、并行探索多个方向。"
         ),
         parameters={
@@ -120,7 +120,7 @@ def create_subagent_tool(
             "properties": {
                 "task": {
                     "type": "string",
-                    "description": "要委派的子任务描述，要自包含（子智能体没有上下文）",
+                    "description": "要委派的子任务描述，要自包含（子 agent 没有上下文）",
                 }
             },
             "required": ["task"],

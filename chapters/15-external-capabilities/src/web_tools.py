@@ -47,7 +47,7 @@ class WebSearchClient:
 
     与第 01 章的 chat 是两套协议：这里走 Anthropic 兼容的
     /messages 端点（不是 chat/completions），密钥复用同一个
-    DEEPSEEK_API_KEY（官方明确「不增加密钥」）。"""
+    DEEPSEEK_API_KEY（官方明确不增加密钥）。"""
 
     def __init__(
         self,

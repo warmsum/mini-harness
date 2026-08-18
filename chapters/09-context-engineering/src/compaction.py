@@ -90,7 +90,7 @@ def select_shadowed_start(
     retain_tokens = int(meter.context_window * retain_ratio)
     accumulated = 0
     tail_start = len(messages)
-    # 下标 0 是 system（信封的一部分），不参与压缩
+    # 下标 0 是 system（envelope的一部分），不参与压缩
     for index in range(len(messages) - 1, 0, -1):
         accumulated += estimate_message(messages[index])
         tail_start = index
@@ -169,7 +169,7 @@ def compact(
         checkpoint = build_checkpoint_message(summary_text)
         checkpoint_tokens = estimate_message(checkpoint)
 
-        # 缩小校验：checkpoint 不小于被压缩区 → 拒绝本次摘要（官方 :17）
+        # 缩小校验：checkpoint 不小于被压缩区 → 拒绝本次摘要（官方文档第 17 行）
         if checkpoint_tokens >= shadowed_tokens:
             print(
                 f"    ↳ 第 {attempt + 1} 次摘要未缩小"

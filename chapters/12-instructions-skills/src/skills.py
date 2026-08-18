@@ -1,8 +1,8 @@
 """第 12 章：Skills —— 按需加载的指令体。
 
-对应官方 packages/skill/skill。核心决策（官方 :56 原文）：
-「定义仍采用渐进式加载。get() 每次调用都向胜出提供方请求正文，
-而不是在此注册表中缓存正文。」
+对应官方 packages/skill/skill。核心决策在官方文档第 56 行：
+定义采用渐进式加载，get() 每次调用都向胜出提供方请求正文，
+而不是在注册表里缓存正文。
 
 教学版实现：
 1. SkillCatalog —— 扫描目录，模型可见的只有 {name, description} 摘要；
@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-# 官方 renderSkillContent 的标签形状（skill-skill/README.zh.md :44）
+# 官方 renderSkillContent 的标签形状（skill 包文档第 44 行）
 SKILL_CONTENT_OPEN = '<skill_content name="{name}">'
 SKILL_CONTENT_CLOSE = "</skill_content>"
 
@@ -64,8 +64,8 @@ class SkillCatalog:
         """渐进加载：每次调用都从磁盘重读正文（不缓存）。
 
         为什么每次重读？技能文件可能被用户随时编辑——缓存会让
-        Agent 拿着旧指令干活。官方 :56 的「每次调用都请求正文」
-        正是为了拿到最新版本。"""
+        Agent 拿着旧指令干活。官方文档第 56 行的每次调用都请求
+        正文，正是为了拿到最新版本。"""
         skill_file = self.root / name / "SKILL.md"
         if not skill_file.is_file():
             raise FileNotFoundError(f"技能 {name} 不存在")

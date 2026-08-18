@@ -7,7 +7,7 @@
 3. approve_once —— 一次性授权：allowed-once 只放行所请求的那一个动作。
 
 诚实边界：官方 bash-sandbox 用内核级隔离（seatbelt/landlock）把
-「文件写效应」挡在系统调用层（shell-bash-sandbox 文档第 85 行
+「文件写效应」挡在系统调用层（bash-sandbox 文档第 85 行
 「限制只覆盖文件影响」）；教学版不实现内核沙箱，只实现「模式门
 + 审批」的决策层，并在对照表中明确差异。
 """

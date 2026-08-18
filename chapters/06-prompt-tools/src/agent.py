@@ -23,7 +23,7 @@ def run_agent(
     max_turns: int = 10,
     variables: dict[str, str] | None = None,
 ) -> Session:
-    """跑一轮带工具调用的对话。请求信封 = 组装出的 system + 注册表 schema。"""
+    """跑一轮带工具调用的对话。请求 envelope = 组装出的 system + 注册表 schema。"""
     tools = registry.all()
     tools_by_name = {tool.name: tool for tool in tools}
     session = Session()

@@ -22,7 +22,7 @@ class SessionEvent:
 
     - id：从 0 开始连续递增（重放校验靠它）；
     - type：事件类型（turn/start、user/message、tool/result……）；
-    - data：事件内容，写入时深冻结，之后不可修改。
+    - data：事件内容，写入时冻结，之后不可修改。
     """
 
     id: int
@@ -47,7 +47,7 @@ class Session:
         """追加一条事件。三个动作：
 
         1. 校验 data 是可序列化的纯 JSON（拒绝函数、集合等）；
-        2. 深冻结 data——日志是不可变历史，防任何后续篡改；
+        2. 冻结 data——日志是不可变历史，防任何后续篡改；
         3. 缓存快照失效，通知订阅者（持久化插件的接缝，第 08 章兑现）。
         """
         frozen_data = _freeze_json(data)
@@ -134,7 +134,7 @@ def _now() -> float:
 
 
 def _freeze_json(value: Any, _path: set[int] | None = None) -> Any:
-    """深冻结 + 纯 JSON 校验。拒绝不可序列化的类型与循环引用。"""
+    """冻结 + 纯 JSON 校验。拒绝不可序列化的类型与循环引用。"""
     path = _path if _path is not None else set()
     if value is None or isinstance(value, (str, bool, int, float)):
         return value

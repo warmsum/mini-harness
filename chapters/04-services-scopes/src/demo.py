@@ -7,7 +7,7 @@
 1. 服务后到自动启动（agent 等 tools 等到自动醒来）
 2. 提供者被卸载 → 依赖方自动卸载
 3. 读服务必须 inject（严格访问报错）
-4. 洋葱瀑布：不碰核心代码，给所有工具加超时日志
+4. waterfall 瀑布：不碰核心代码，给所有工具加超时日志
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ def main() -> None:
         print("  ← 依赖显式化不是约定，是语法")
 
     print()
-    print("=== 时刻 4：洋葱瀑布 ===")
+    print("=== 时刻 4：waterfall 瀑布 ===")
 
     def timeout_policy(c: Context, _config: object) -> None:
         def wrap(exec_: dict, next_: object) -> str:

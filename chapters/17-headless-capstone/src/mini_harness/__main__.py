@@ -25,7 +25,7 @@ SESSION_FILE = "session.jsonl"
 
 
 def build_agent() -> Agent:
-    """组装 Agent：第 06 章的信封 + 第 07 章的循环 + 第 02 章的工具。"""
+    """组装 Agent：第 06 章的 envelope + 第 07 章的循环 + 第 02 章的工具。"""
     assembler = PromptAssembler()
     assembler.section(
         "persona",

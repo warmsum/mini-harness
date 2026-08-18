@@ -1,49 +1,47 @@
-# 06｜请求信封：系统提示词与工具清单的组装
+# 06｜请求 envelope 组装
 
 > 预计时间：55 分钟 ｜ 前置：完成第 05 章 ｜ 本章调用真实 DeepSeek 模型
 
-第 05 章结束时，每次请求发给模型的东西长这样：
+第 05 章结束时，每次发给模型的请求长这样：
 
-```
-messages = [system 提示词, ...会话投影出来的消息]
-tools = [calculator]   # 一张写死的列表
+```python
+messages = [Message(role="system", content=system_prompt), *session.derive_messages()]
+tools = [calculator]  # 一张写死的列表
 ```
 
 系统提示词是一整块手写的字符串，工具清单是一张裸列表。对只有一个计算器
-的玩具 Agent，这样没问题；但真实 Agent 的提示词会来自四面八方——人设、
-安全规则、工具说明各是一段，而工具清单会随注册的动态变化。本章把这两样
-东西变成**可组装**的：多个贡献者各贡献一段，组装器统一排序拼接。
+的玩具 Agent，这样没问题；真实 Agent 的提示词来自四面八方——人设、安全
+规则、工具说明各是一段，工具清单随注册动态变化，还夹着模型名这类只有
+运行时才知道的值。本章把这两样东西变成可组装的：多个贡献者各贡献一段，
+组装器统一排序拼接，注册表统一管理工具并投影出给模型的说明书。
 
-官方把这两样东西统称为请求的**信封**（envelope）——与消息历史并列、
-每次请求都要携带的部分。官方的 `core/system-prompt` 文档开头写道：
-「系统提示词组装注册表。插件可以贡献有序段、工具 schema 和具名变量。
-循环在每个步骤组装一次，并将结果渲染为完整的模型提示词」。
+官方把这两样与消息历史并列、每次请求都要携带的部分统称请求的 envelope。
+官方 core/system-prompt 文档开篇写明：系统提示词组装注册表，插件可以贡献
+有序段、工具 schema 和具名变量，循环在每个步骤组装一次，并将结果渲染为
+完整的模型提示词。
 
-## 6.1 原理：系统提示词为什么要「组装」
+## 6.1 系统提示词为什么要组装
 
-先看一个真实 Agent 的提示词都由哪些部分组成：
+先看一个真实 Agent 的提示词由哪些部分组成：
 
-| 段 | 内容举例 | 谁贡献的 |
-|----|----------|----------|
-| 人设 | 「你是一个数学助手……」 | 人设插件 |
-| 工具目录 | 「可用工具：calculator……」 | 工具注册表 |
-| 安全规则 | 「所有计算必须经工具，禁止心算」 | 沙箱插件 |
-| 运行时信息 | 「当前模型：deepseek-chat」 | 框架自身 |
+| 段 | 内容举例 | 贡献者 |
+|----|----------|--------|
+| 人设 | 你是一个数学助手，遇到算式先调用工具 | 人设插件 |
+| 规则 | 回答先给结论，再给过程 | 沙箱插件 |
+| 工具目录 | 可用工具：calculator…… | 工具注册表 |
+| 运行时信息 | 当前模型：deepseek-chat | 框架自身 |
 
-四个来源，四个插件，各自只关心自己那一段。如果不组装，谁写整个提示词？
-只有两种结局：要么全部塞进主流程（又是第 03 章的上帝函数），要么让
-插件互相改同一个字符串（顺序即灾难）。
+四个来源各自只关心自己那一段。不组装只有两种结局：全部塞进主流程，回到
+第 03 章说过的上帝函数；或者让插件互相改写同一个字符串，顺序即灾难。
 
-组装器（assembler）的设计把「贡献」和「拼接」分开：
+组装器把贡献和拼接分开：每个插件调用 `section(name, text, order)` 贡献
+一段，组装时按 order 排序拼接。组装结果只由 order 决定，与插件加载顺序
+无关，这是确定性的要求——官方对工具顺序有同样的要求，toolOrder 配置
+写明注册顺序只是插件加载时序的产物，不能影响最终结果。
 
-1. 每个插件调用 `section(name, text, order)` 贡献一段；
-2. 组装时按 `order` 排序拼接，同 order 按名字排序——**组装结果只由
-   order 决定，与插件加载顺序无关**（确定性，官方 :14 对 toolOrder
-   也是同样要求）。
-
-官方还支持「具名变量」：段文本里写 `{{model}}` 这样的占位符，组装时
-用运行时值替换——提示词需要「当前模型名」这类只有运行时才知道的信息
-时，变量机制避免了字符串拼接的脆弱。
+官方还支持具名变量：段文本里写 `{{model}}` 这样的占位符，组装时用运行时
+值替换。提示词需要模型名、当前目录这类只有运行时才知道的信息时，变量
+机制替代了脆弱的字符串拼接。
 
 ## 6.2 PromptAssembler：段的贡献与拼接
 
@@ -72,24 +70,24 @@ class PromptAssembler:
         return text
 ```
 
-三个要点：
+三个机制：
 
-- **排序键 `(order, name)`**：order 是主键（数字小的在前），name 是
-  兜底——两个段 order 相同时按名字排，保证结果稳定。官方用负数 order
-  放最前面的固定开场白（`includeHarnessIdentity` 默认顺序 −100），
-  我们的人设段用 0，规则段用 100，同一条思路。
-- **同名覆盖**：同一个名字的段重复贡献时后者胜。真实场景里这是
-  「agent 级人设覆盖全局人设」的基础（官方 :13 的 persona 遮蔽机制）。
-- **变量替换**：`render(variables)` 把 `{{name}}` 换成真实值。注意
-  替换只发生在 render 时——段文本本身保持模板原样，同一份模板可以
-  用不同的变量渲染出不同结果。
+1. 排序键 `(order, name)`。order 是主键，数字小的在前；name 是兜底，两个
+   段 order 相同时按名字排，结果稳定。官方用负数 order 放固定开场白，
+   includeHarnessIdentity 的默认顺序是 −100，0 是 persona 的位置，工具
+   引导用 100–199。教学版的人设段用 0、规则段用 100，同一条思路。
+2. 同名覆盖。同名段重复贡献时后者胜。真实场景里这是 agent 级人设遮蔽
+   全局人设的基础，官方 persona 正是顺序 0 的段，被 agent 作用域的贡献
+   遮蔽。
+3. 变量替换。`render(variables)` 把 `{{name}}` 换成真实值。替换只发生在
+   render 时，段文本保持模板原样，同一份模板可以配不同的变量渲染出不同
+   结果。
 
-## 6.3 ToolRegistry：工具从列表到注册表
+## 6.3 ToolRegistry：从列表到注册表
 
-第 02 章的工具清单 `list[Tool]` 有一个隐患：`Tool` 里同时装着「给模型
-看的说明书」（name/description/parameters）和「给程序跑的执行器」
-（execute）。把整个对象传给模型侧逻辑，等于把执行器也暴露了出去。
-注册表把这两个接口分开：
+第 02 章的工具是 `list[Tool]`，`Tool` 里同时装着两样东西：给模型看的
+说明书，name、description、parameters；给程序跑的执行器，execute。把整个
+对象传给模型侧逻辑，执行器也一并暴露。注册表把两个接口分开：
 
 ```python
 class ToolRegistry:
@@ -101,9 +99,6 @@ class ToolRegistry:
             raise ValueError(f'工具 "{tool.name}" 已被注册')
         self._tools[tool.name] = tool
 
-    def unregister(self, name: str) -> None:
-        del self._tools[name]
-
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
 
@@ -111,7 +106,7 @@ class ToolRegistry:
         return list(self._tools.values())
 
     def schemas(self) -> list[dict[str, Any]]:
-        """投影出「给模型看的说明书清单」：不含 execute。"""
+        """投影出给模型看的说明书清单：不含 execute。"""
         return [
             {
                 "name": tool.name,
@@ -122,12 +117,13 @@ class ToolRegistry:
         ]
 ```
 
-`schemas()` 是注册表与裸列表的关键区别：模型侧逻辑拿到的永远只是
-说明书投影，执行器留在程序侧。这个分离在官方叫 **schema 投影**——
-`core/tools` 文档里 `ctx.tools.schemas(scope)` 返回「该作用域可见的
-所有 schema（不含 execute 函数）」（官方 :24）。
+注册是入口校验点：重名即抛错，两个同名工具会让模型传参产生歧义，必须在
+入口挡掉。`schemas()` 是注册表与裸列表的关键区别：模型侧逻辑拿到的永远
+只是说明书投影，执行器留在程序侧。官方 core/tools 文档写明，schemas 返回
+该作用域可见的所有 schema，不含 execute 函数。这个分离在官方叫 schema
+投影，也是第 12 章技能和所有后续工具章节的基础。
 
-## 6.4 接进循环：信封的两半
+## 6.4 接进循环：envelope 的两半
 
 第 05 章的 `run_agent` 只改两处：
 
@@ -148,9 +144,9 @@ def run_agent(client, registry, assembler, user_prompt,
         # ...其余与第 05 章相同
 ```
 
-请求信封的两半各就各位：system 由组装器产出，tools 由注册表产出。
-循环本身不再知道提示词有几段、工具是谁注册的——这正是第 03 章
-「组织」痛点的解药：主流程只剩骨架，细节都在贡献者手里。
+请求 envelope 的两半各就各位：system 由组装器产出，tools 由注册表产出。
+循环本身不再知道提示词有几段、工具是谁注册的。第 03 章组织痛点的解药
+在这里兑现：主流程只剩骨架，细节都在贡献者手里。
 
 ## 6.5 跑一遍完整 demo
 
@@ -158,7 +154,7 @@ def run_agent(client, registry, assembler, user_prompt,
 uv run python chapters/06-prompt-tools/src/demo.py
 ```
 
-真实输出：
+真实输出，模型回复内容每次不同，组装结果稳定：
 
 ```
 === ① 组装出的系统提示词 ===
@@ -183,46 +179,54 @@ uv run python chapters/06-prompt-tools/src/demo.py
     }
   }
 ]
-  ← 注意：只有 name/description/parameters，没有 execute
+  ← 只有 name/description/parameters，没有 execute
 
 === ③ 真实跑一遍 ===
-  [assistant] 结论：1 + 2 × 3 = 7
-  过程：根据运算优先级，先算乘法 2 × 3 = 6，再算加法 1 + 6 = 7。
+  [assistant]
+  [assistant] 1+2*3 = **7**
+
+先算乘法 2×3=6，再加 1，得 7。
 ```
 
-三节对应三个机制：① 人设段（order 0）+ 规则段（order 100）按序拼接，
-`{{name}}` 被替换成「小算」；② 注册表投影出的说明书恰好是模型需要
-的形状，`execute` 不见踪影；③ 组装出的信封驱动了一次真实对话。
+三节对应三个机制：① 人设段（order 0）与规则段（order 100）按序拼接，
+`{{name}}` 被替换成小算；② 注册表投影出的说明书恰好是模型需要的形状，
+execute 不见踪影；③ 组装出的 envelope 驱动了一次真实对话，第一行空
+assistant 消息是模型请求工具的那一步，内容为空、只带 tool_calls，投影
+后正文留空。
 
-## 6.6 本章小结：亲手写了什么
+## 本章小结
 
 - `PromptSection` / `PromptAssembler`：段的贡献、确定性排序（order+name）、
   同名覆盖、变量替换
-- `ToolRegistry`：注册查重、注销、`schemas()` 说明书投影
-- 循环改造：请求信封的两半（组装 system + 注册表 tools）
+- `ToolRegistry`：注册查重、`schemas()` 说明书投影，模型接口与执行接口分离
+- 循环改造：请求 envelope 的两半，组装出的 system 与注册表的 tools
 
-## 6.7 对照官方 DSH
+## 对照官方
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/core/system-prompt/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/core/system-prompt/README.zh.md) | `PromptAssembler` | 官方组装注册表（第 5 行）；`section()` 贡献段（第 20 行）；`variable()` 具名变量（第 24 行） |
-| 同上（第 13-14 行） | 排序与覆盖 | 官方 persona 是顺序 0 的段、可被 agent 作用域遮蔽；工具顺序有专门的 toolOrder 配置 |
-| [`packages/core/tools/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/core/tools/README.zh.md) | `ToolRegistry` | 官方注册表（第 20 行 register）与 schema 投影（第 24 行） |
+| [`packages/core/system-prompt/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/core/system-prompt/README.zh.md) | `PromptAssembler` | 组装注册表定义在第 5 行；`section()` 贡献段在第 20 行；`variable()` 具名变量在第 24 行 |
+| 同上，第 13 行 | 同名覆盖 | 官方 persona 是顺序 0 的段，agent 作用域的贡献将其遮蔽，与教学版同名覆盖同构 |
+| 同上，第 11、14 行 | 排序确定性 | 官方固定开场白顺序 −100；toolOrder 显式指定工具顺序，未列工具按名称字典序，注册顺序不影响结果 |
+| [`packages/core/tools/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/core/tools/README.zh.md) | `ToolRegistry` | `register` 在第 20 行，`schemas()` 不含 execute 在第 24 行 |
 
-官方比我们多一块：工具 schema 本身也作为**提示词段**注入（工具目录段），
-由组装器统一渲染——模型看到的工具说明与 system 提示词是一体的。我们
-把两者分开渲染（协议原生 tools 字段），效果等价、结构更直观，差异
-在练习 3 里展开。
+官方比教学版多一块：工具 schema 属于组装结果本身。core/tools 文档写明
+注册表通过 `ctx.systemPrompt.tools()` 自动把工具 schema 送入系统提示词
+组装，模型获知自己能做什么是一个连贯整体，适配器再把 schema 作为独立
+wire 字段传输。教学版把两者分开渲染，协议原生的 tools 字段直接交给
+client，结构更直观，差异在练习 3 展开。
 
-## 6.8 练习
+## 练习
 
-1. **顺序实验**：把规则段的 order 改成 −10，观察组装结果中规则段是否
-   排到人设段前面；再解释为什么「确定性」对调试至关重要。
-2. **同名覆盖**：贡献两个同名段（不同内容、不同 order），观察哪个
-   生效；把这个行为与官方「agent 人设遮蔽全局人设」联系起来。
-3. **工具目录段**：仿照官方，把 `registry.schemas()` 渲染成一段文本
-   （如「可用工具：calculator——计算四则运算……」）作为 order 50 的段
-   贡献给组装器；对比「协议 tools 字段」与「写进提示词」两种方式的
-   差异（提示：模型是否还会按 JSON Schema 传参）。
-4. **变量缺省**：render 时不传 variables（demo 第 ③ 节之前改掉传参），
-   观察 `{{name}}` 原样进入请求后模型如何理解它。
+1. **顺序实验。** 把规则段的 order 改成 −10，跑 demo 观察规则段是否排到
+   人设段前面；再解释确定性排序对调试的价值：同一个 bug 为什么必须能
+   稳定复现。
+2. **同名覆盖。** 贡献两个同名段，内容与 order 都不同，观察哪个生效；
+   把这个行为与官方 agent 人设遮蔽全局人设联系起来，说明两者各自解决
+   什么场景。
+3. **工具目录段。** 仿照官方，把 `registry.schemas()` 渲染成一段文本，作为
+   order 50 的段贡献给组装器。对比协议 tools 字段与写进提示词两种方式，
+   模型是否还会按 JSON Schema 传参，token 消耗有什么差异。
+4. **变量缺省。** 在 demo 里删掉 `variables={"name": "小算"}` 这个传参，
+   观察 `{{name}}` 原样进入请求后模型如何理解它。官方对未提供值的变量
+   会直接抛错，教学版选择原样通过，权衡一下两种策略。

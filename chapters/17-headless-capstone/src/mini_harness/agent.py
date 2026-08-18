@@ -6,7 +6,7 @@
 
 层级术语（与官方对齐）：
 - turn（轮次）：一次「唤醒到完成」的边界，由 turn/start 与 turn/end 夹住；
-- step（拍）：一轮内部的一次「模型调用 + 工具执行」。
+- step（步骤）：一轮内部的一次「模型调用 + 工具执行」。
 """
 
 from __future__ import annotations
@@ -53,11 +53,11 @@ class Agent:
         return self._session
 
     # ------------------------------------------------------------------
-    # 主循环：领取 → 轮次 → 拍
+    # 主循环：领取 → 轮次 → 步骤
     # ------------------------------------------------------------------
 
     def run(self, max_turns: int = 5) -> Session:
-        """处理收件箱直到没有待处理消息（教学版同步实现；
+        """处理 inbox 直到没有待处理消息（教学版同步实现；
         官方在这里是常驻驱动器，空闲时挂起等待唤醒）。"""
         tools = self._registry.all()
         tools_by_name = {tool.name: tool for tool in tools}
@@ -77,8 +77,8 @@ class Agent:
 
     def _run_turn(self, tools: list, tools_by_name: dict) -> None:
         """一轮内部：反复「领 steer → 请求模型 → 执行工具」直到模型作答。"""
-        for _step in range(10):  # 安全阀：单轮最多 10 拍
-            # 每拍开始前领 step 级输入：steer 在这里插队生效
+        for _step in range(10):  # 安全阀：单轮最多 10 个 step
+            # 每个 step 开始前领 step 级输入：steer 在这里插队生效
             if steer_message := self._inbox.claim_step():
                 self._session.append(
                     "user/message",
@@ -122,4 +122,4 @@ class Agent:
                     "tool/result",
                     {"call_id": call.id, "content": result, "is_error": "出错" in result},
                 )
-        raise RuntimeError(f"第 {self._turn_no} 轮超过 10 拍仍未结束")
+        raise RuntimeError(f"第 {self._turn_no} 轮超过 10 个 step 仍未结束")

@@ -1,4 +1,4 @@
-"""第 06 章 demo：组装请求信封，然后跑一遍真实对话。
+"""第 06 章 demo：组装请求 envelope，然后跑一遍真实对话。
 
 运行（在项目根目录，需要 .env）：
     uv run python chapters/06-prompt-tools/src/demo.py
@@ -21,7 +21,7 @@ from registry import ToolRegistry
 
 
 def main() -> None:
-    # ① 组装系统提示词：三个插件各贡献一段
+    # ① 组装系统提示词：两个来源各贡献一段，{{name}} 留待渲染时替换
     assembler = PromptAssembler()
     assembler.section(
         "persona",

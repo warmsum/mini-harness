@@ -26,7 +26,7 @@ def main() -> None:
         ("client.py", "第 01/02 章", "流式客户端 + 工具调用消息模型"),
         ("session.py", "第 05 章", "事件日志与消息投影"),
         ("registry.py / prompt.py", "第 06 章", "工具注册表 + 提示词组装"),
-        ("agent.py / inbox.py", "第 07 章", "常驻循环与收件箱"),
+        ("agent.py / inbox.py", "第 07 章", "常驻循环与 inbox"),
         ("persistence.py", "第 08 章", "JSONL 持久化"),
         ("meter.py", "第 09 章", "token 计量"),
         ("calculator.py", "第 02 章", "计算器工具"),

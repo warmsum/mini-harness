@@ -5,8 +5,8 @@
 
 演示：
 1. 主 agent 收到「同时算两件事」的任务 → 一轮里请求两次 subagent 工具；
-2. 两个子智能体并行执行（计时：总耗时 ≈ 单个耗时，而非两倍）；
-3. 上下文隔离证据：子智能体看到的完整消息只有 system + task；
+2. 两个子 agent并行执行（计时：总耗时 ≈ 单个耗时，而非两倍）；
+3. 上下文隔离证据：子 agent看到的完整消息只有 system + task；
 4. 主 agent 汇总子结果给出最终回答。
 """
 
@@ -54,12 +54,12 @@ def main() -> None:
     results = run_subagents_parallel(specs, client)
     elapsed = time.monotonic() - started
     for index, result in enumerate(results, start=1):
-        print(f"  [子agent#{index}] {result.output}  ({result.stop_reason})")
+        print(f"  [子 agent#{index}] {result.output}  ({result.stop_reason})")
     print(f"  总耗时: {elapsed:.1f}s（若串行执行约为两倍）")
 
     print()
     print("=== ③ 上下文隔离证据 ===")
-    # 子智能体内部的会话只有 system + task——这里用一个探测会话展示
+    # 子 agent内部的会话只有 system + task——这里用一个探测会话展示
     probe = Session()
     probe.append("turn/start", {"turn": 1})
     probe.append("user/message", {"content": specs[0][0]})

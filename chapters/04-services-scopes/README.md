@@ -1,27 +1,27 @@
-# 04｜服务与依赖：让插件学会「等待」和「拦截」
+# 04｜服务与依赖
 
 > 预计时间：70 分钟 ｜ 前置：完成第 03 章 ｜ 本章纯本地运行，不调用模型
 
-第 03 章的插件系统能安装插件、能自动清理，但插件之间是**孤岛**：每个插件
-只能靠 `ctx.on` 喊话，没有办法直接使用别的插件提供的能力。真实 Agent 里
-这行不通——「模型连接」是一项能力，「工具注册表」是另一项，而 Agent 循环
-插件两个都要用。本章解决的就是这个问题：**插件之间如何共享能力**。
+第 03 章的插件系统能安装插件、能自动清理，但插件之间是孤岛：每个插件只能
+靠 `ctx.on` 喊话，没有办法直接使用别的插件提供的能力。真实 Agent 里这行不
+通，模型连接是一项能力，工具注册表是另一项，而 Agent 循环插件两个都要用。
+本章解决的就是这个问题：插件之间如何共享能力。
 
-官方 cordis 的答案叫**依赖注入**（Dependency Injection）：插件在安装前
-**声明**自己需要哪些能力（叫服务，service），环境负责把这些能力递到它
-手里；需要的服务还没就绪时，插件**安静等待**，服务一出现，它**自动
-启动**。这套机制会带来三个让人眼前一亮的时刻，本章逐一实现并演示：
+官方 cordis 的答案叫依赖注入。插件在安装前声明自己需要哪些能力，这些能力
+叫服务，环境负责把它们递到插件手里；需要的服务还没就绪时，插件安静等待，
+服务一出现，它自动启动。这套机制会带来三个让人眼前一亮的结果，本章逐一
+实现并演示：
 
 1. 服务后到，插件自动醒来；
 2. 提供者被卸载，依赖方自动卸载；
-3. 读服务必须先声明依赖——依赖显式化是语法，不是约定。
+3. 读服务必须先声明依赖，依赖显式化是语法，不是约定。
 
-本章最后还会实现事件系统的升级版——**瀑布**（waterfall），官方用它搭起
-整个工具执行管线：一个插件不碰核心代码，就能给所有工具加上超时、日志。
+本章最后还会实现事件系统的升级版，waterfall。官方用它搭起整个工具执行管线，
+一个插件不碰核心代码，就能给所有工具加上超时和日志。
 
-## 4.1 原理：两种共享能力的方式，为什么选依赖注入
+## 4.1 两种共享方式，为什么选依赖注入
 
-插件 A 提供了模型连接，插件 B 要用它。最直白的做法是什么？全局变量：
+插件 A 提供了模型连接，插件 B 要用它。最直白的做法是全局变量：
 
 ```python
 llm_client = None  # 模块级全局变量
@@ -36,30 +36,29 @@ def plugin_b(ctx, _config):
 
 这个写法能跑，但有三个致命伤：
 
-1. **顺序耦合**：B 必须比 A 晚安装，而且 B 内部写死了「A 一定先装好」这个
-   假设。插件一多，安装顺序变成暗雷。
-2. **无法卸载**：A 被卸载后，`llm_client` 该不该清空？B 还指着它呢。
-3. **无法替换**：测试时想给 B 换个假模型，只能改全局变量，牵一发动全身。
+1. 顺序耦合。B 必须比 A 晚安装，而且 B 内部写死了 A 一定先装好这个假设。
+   插件一多，安装顺序变成暗雷。
+2. 无法卸载。A 被卸载后，`llm_client` 该不该清空？B 还指着它呢。
+3. 无法替换。测试时想给 B 换个假模型，只能改全局变量，牵一发动全身。
 
-依赖注入把「找服务」从「用服务」里拆出来。B 不主动找 A，只声明
-「我需要一个叫 llm 的服务」；环境负责在 llm 就绪时启动 B，把服务递进
-B 的手里（记在 B 的依赖快照里）。B 从此不关心 llm 是谁提供的、什么时候
-提供的、会不会被换成别的——这正是 3.1 节「复用与替换」的落地。
+依赖注入把找服务从用服务里拆出来。B 不主动找 A，只声明我需要一个叫 llm 的
+服务；环境负责在 llm 就绪时启动 B，把服务递进 B 的手里，记在 B 的依赖快照
+里。B 从此不关心 llm 是谁提供的、什么时候提供的、会不会被换成别的。
 
-官方把这套机制做得更彻底：连「读服务」这个动作都要检查你有没有声明
-依赖（读未声明的服务直接报错）。为什么要这么严格？想象一个没有声明
-约束的框架：任何插件都能随手抓任何服务，插件之间的真实依赖关系散落在
-几百个文件里，卸载一个服务时没人知道谁会受影响。强制声明让依赖关系
-**写在了明面上**——环境的登记簿里查得到每个插件依赖谁。
+官方把这套机制做得更彻底：连读服务这个动作都要检查有没有声明依赖，读未
+声明的服务直接报错。为什么这么严格？一个没有声明约束的框架里，任何插件
+都能随手抓任何服务，插件之间的真实依赖关系散落在几百个文件里，卸载一个
+服务时没人知道谁会受影响。强制声明让依赖关系写在了明面上，环境的登记簿里
+查得到每个插件依赖谁。
 
-## 4.2 provide / get：服务的注册与查找
+## 4.2 provide 与 get
 
-先给环境加一张**服务表**。`provide` 注册服务，`get` 非严格查找：
+先给环境加一张服务表。`provide` 注册服务，`get` 非严格查找：
 
 ```python
 class Context:
     def __init__(self) -> None:
-        # ...（第 03 章字段略）
+        # 第 03 章字段略
         self._services: dict[str, tuple[object, int, int]] = {}
         self._version = 0
 
@@ -83,16 +82,15 @@ class Context:
         return impl[0] if impl is not None else None
 ```
 
-服务表的值是一个三元组 `(value, provider_uid, version)`，后两项是为
-4.3 节的依赖重算准备的，这里先记住它们的含义：
+服务表的值是一个三元组 `(value, provider_uid, version)`，后两项为 4.3 节的
+依赖重算准备，这里先记住含义：
 
-- `provider_uid`：谁提供的。第 03 章给每个句柄发过全局唯一的 uid。
-- `version`：第几次 provide。每次 `provide` 递增——**同名服务被重新提供
-  时，version 变化**，依赖方据此知道自己手里的服务过期了。
+- `provider_uid` 是谁提供的。第 03 章给每个句柄发过全局唯一的 uid。
+- `version` 是第几次 provide。每次 `provide` 递增，同名服务被重新提供时
+  version 变化，依赖方据此知道自己手里的服务过期了。
 
-另外注意 `provide` 把注销函数挂到了当前插件名下：**提供者被卸载，服务
-随之注销**（第 03 章的 effect 机制自动完成）。这正是官方语义——服务跟着
-它的提供者走。
+`provide` 把注销函数挂到了当前插件名下，提供者被卸载，服务随之注销。这是
+第 03 章的 effect 机制自动完成的，服务跟着它的提供者走。
 
 `_notify()` 遍历全部句柄重算依赖，是整套机制的中枢：
 
@@ -102,11 +100,10 @@ class Context:
             handle._recheck()
 ```
 
-## 4.3 inject 与依赖等待：服务后到，自动醒来
+## 4.3 inject 与依赖等待
 
-现在给插件加「声明依赖」的能力。Python 里最自然的方式是给插件函数挂
-一个属性（官方 cordis 在 JavaScript 里用 `Object.assign(fn, {inject})`，
-思路完全一样）：
+现在给插件加声明依赖的能力。Python 里最自然的方式是给插件函数挂一个属性，
+官方 cordis 在 JavaScript 里用 `Object.assign(fn, {inject})`，思路完全一样：
 
 ```python
 def agent(ctx, _config):
@@ -115,16 +112,16 @@ def agent(ctx, _config):
 agent.inject = ["llm", "tools"]
 ```
 
-句柄构造时读取这个声明，然后**重算依赖**：
+句柄构造时读取这个声明，然后重算依赖：
 
 ```python
 class PluginHandle:
     def __init__(self, ctx, plugin, config):
-        # ...（第 03 章字段略）
+        # 第 03 章字段略
         self.inject = frozenset(getattr(plugin, "inject", ()))
         self._store: dict[str, object] = {}   # 依赖快照
         self._epoch: str | None = None        # 依赖签名
-        # ...
+        # 其余同第 03 章
         self._recheck()  # 第 03 章这里是直接 _run()
 ```
 
@@ -162,31 +159,29 @@ class PluginHandle:
 
 逐段推演这套逻辑：
 
-**第一步：算签名。** 每个依赖名解析出一个 `uid:version` 字符串，拼成
-签名（epoch）。服务缺失的依赖记 `-`。签名精确描述了「我看到的服务世界
-长什么样」。
+第一步，算签名。每个依赖名解析出一个 `uid:version` 字符串，拼成签名 epoch。
+服务缺失的依赖记 `-`。签名精确描述了我看到的服务世界长什么样。
 
-**第二步：签名没变就返回。** `_notify` 会在每次 provide/注销时叫醒全部
-句柄，签名比较保证只有**真正受影响**的插件才会动作——没有这一步，每次
-provide 都会导致全体插件重装。
+第二步，签名没变就返回。`_notify` 会在每次 provide 和注销时叫醒全部句柄，
+签名比较保证只有真正受影响的插件才会动作。没有这一步，每次 provide 都会
+导致全体插件重装。
 
-**第三步：变了就动作。** 依赖全齐：卸载旧状态（如果之前活着），填好
-快照，重新执行插件函数——这就是「热重载」；依赖缺失：卸载后回到
-`pending` 等待。两条路径覆盖了本章开头的两个魔法时刻：
+第三步，变了就动作。依赖全齐时，卸载旧状态，填好快照，重新执行插件函数，
+这就是热重载；依赖缺失时，卸载后回到 `pending` 等待。两条路径覆盖了本章
+开头的两个结果：
 
-- **服务后到自动醒来**：agent 声明依赖 tools，tools 未提供时签名是
+- 服务后到自动醒来。agent 声明依赖 tools，tools 未提供时签名是
   `"uid:ver,-"`，句柄保持 pending；tools 出现后签名变成
   `"uid:ver,uid:ver"`，不等任何人吩咐，agent 自己启动。
-- **提供者卸载自动退场**：tools 提供者被卸载（第 03 章的 effect 机制
-  自动注销服务），签名里的 tools 变回 `-`，agent 卸载自己回到 pending。
+- 提供者卸载自动退场。tools 提供者被卸载，第 03 章的 effect 机制自动注销
+  服务，签名里的 tools 变回 `-`，agent 卸载自己回到 pending。
 
-依赖快照 `_store` 是「环境递给插件的那只手」——4.4 节的严格访问就查它。
+依赖快照 `_store` 是环境递给插件的那只手，4.4 节的严格访问就查它。
 
 ## 4.4 __getattr__：读服务必须先声明
 
-Python 对象访问不存在的属性时，解释器会调用 `__getattr__`。这给了我们
-一个实现「依赖显式化」的机会——与官方 cordis 用 Proxy 拦截属性读取
-异曲同工（官方 `context.ts` 第 74 行）：
+Python 对象访问不存在的属性时，解释器会调用 `__getattr__`。这给了我们一个
+实现依赖显式化的机会，与官方 cordis 用 Proxy 拦截属性读取异曲同工：
 
 ```python
     def __getattr__(self, name: str) -> Any:
@@ -203,26 +198,25 @@ Python 对象访问不存在的属性时，解释器会调用 `__getattr__`。�
 
 三种结局：
 
-1. **声明过且已就绪** → 返回快照里的服务值（`ctx.llm` 的常规路径）；
-2. **声明过但没就绪** → 报「已声明依赖但尚未就绪」——插件在 pending 期
-   间误读服务时，这个错误能立刻指出问题所在；
-3. **根本没声明** → 报「必须先 inject」——即使服务明明存在。
+1. 声明过且已就绪，返回快照里的服务值，这是 `ctx.llm` 的常规路径；
+2. 声明过但没就绪，报已声明依赖但尚未就绪，插件在 pending 期间误读服务时，
+   这个错误能立刻指出问题所在；
+3. 根本没声明，报必须先 inject，即使服务明明存在。
 
-第三种结局正是依赖显式化的语法级体现：demo 时刻 3 里，`ctx.llm` 的服务
-明明在线上，直接读却报错。值得注意的是 `__getattr__` 的一个工程代价：
-它只在普通属性查找失败时才被调用，且会干扰 `copy`/`pickle` 等依赖属性
-探测的库——官方 cordis 的 Proxy 同样有这类取舍，这是「严格」的代价。
+第三种结局正是依赖显式化的语法级体现：demo 时刻 3 里，`ctx.llm` 的服务明明
+在线上，直接读却报错。`__getattr__` 有一个工程代价：它只在普通属性查找失败
+时才被调用，且会干扰 `copy`、`pickle` 等依赖属性探测的库，官方 cordis 的
+Proxy 同样有这类取舍，这是严格的代价。
 
-## 4.5 waterfall：洋葱模型
+## 4.5 waterfall
 
-第 03 章的 `emit` 只能广播通知，监听器不能拦、不能改。真实框架需要
-更强大的形态：一条**执行管线**，多个插件都能在管线里加一层包装。官方
-的工具执行管线就是这种形态——权限插件、超时插件、日志插件各挂一层，
-谁都不用改核心代码。
+第 03 章的 `emit` 只能广播通知，监听器不能拦、不能改。真实框架需要更强大
+的形态：一条执行管线，多个插件都能在管线里加一层包装。官方的工具执行管线
+就是这种形态，权限插件、超时插件、日志插件各挂一层，谁都不用改核心代码。
 
-这种形态叫 **waterfall**（瀑布），俗称洋葱模型：监听器像洋葱皮一样
-一层层包住最内层的执行器。请求从最外层进入，一层层往里钻，到达最内层
-执行器后，结果再一层层往外返回：
+这种形态叫 waterfall，俗称瀑布式事件，监听器一层层包住最内层
+的执行器。请求从最外层进入，一层层往里钻，到达最内层执行器后，结果再一层
+层往外返回：
 
 ```mermaid
 flowchart LR
@@ -230,7 +224,7 @@ flowchart LR
     C --> R2[监听器2 收尾] --> R1[监听器1 收尾] --> B[结果]
 ```
 
-实现（核心只有十行）：
+实现，核心只有十行：
 
 ```python
     def waterfall(self, event: str, *args: Any) -> Any:
@@ -252,13 +246,12 @@ flowchart LR
 
 三个约定：
 
-1. **最后一个参数是 next**：最内层的执行器。
-2. **每个监听器收到 `(…参数, next)`**：调 `next()` 放行进入内层，返回值
-   沿链回传；不调 `next()` 即否决这次派发（权限插件的用法）。
-3. **`next()` 不带参数时原参数原样下传**，带参数则替换——这给拦截改写
-   留了口子。
+1. 最后一个参数是 next，最内层的执行器。
+2. 每个监听器收到参数加 next，调 `next()` 放行进入内层，返回值沿链回传；
+   不调 `next()` 即否决这次派发，权限插件的用法。
+3. `next()` 不带参数时原参数原样下传，带参数则替换，这给拦截改写留了口。
 
-典型用法——一个「超时策略」插件，给所有工具执行加上日志，不改核心一行：
+典型用法，一个超时策略插件，给所有工具执行加上日志，不改核心一行：
 
 ```python
 def timeout_policy(c: Context, _config) -> None:
@@ -277,21 +270,21 @@ def timeout_policy(c: Context, _config) -> None:
 result = ctx.waterfall("tools/execute", {"name": "calculator"}, core_executor)
 ```
 
-外层 `wrap` 先打印「开始」，调 `next()` 钻进 `core_executor` 真正干活，
-拿回结果打印「完成」，把结果原样交回调用方。这个模式在官方 Harness 里
-就是 `tools/pre-execute → tools/execute → tools/post-execute` 三级瀑布的
-雏形，第 05 章会把它做成真正的工具注册表。
+外层 `wrap` 先打印开始，调 `next()` 钻进 `core_executor` 真正干活，拿回结果
+打印完成，把结果原样交回调用方。这个模式在官方 Harness 里就是
+`tools/pre-execute → tools/execute → tools/post-execute` 三级瀑布的雏形，
+第 05 章会把它做成真正的工具注册表。
 
 ## 4.6 作用域：官方的 isolate 与我们的简化
 
-官方 cordis 还有一个本章标题里的概念：**作用域**（isolate）。它的用途
-是「同一个服务名，不同插件看到不同实例」——比如每个 agent 各有自己的
-工具注册表、自己的文件系统后端。官方用 `ctx.isolate(name)` 给服务名
-分配作用域标签，查找时按标签隔离。
+官方 cordis 还有一个本章标题里的概念，作用域 isolate。它的用途是同一个服务
+名，不同插件看到不同实例，比如每个 agent 各有自己的工具注册表、自己的文件
+系统后端。官方用 `ctx.isolate(name)` 给服务名分配作用域标签，查找时按标签
+隔离。
 
-教学版做了诚实的简化：**不实现 isolate**。需要隔离时，直接创建一个全新
-的 `Context`（每个子 agent 一个独立环境）——第 14 章的子 agent 就这么做。
-这个简化损失了一点内存共享，换来了概念上的干净。官方实现见
+教学版做了诚实的简化，不实现 isolate。需要隔离时，直接创建一个全新的
+`Context`，每个子 agent 一个独立环境，第 14 章的子 agent 就这么做。这个简化
+损失了一点内存共享，换来了概念上的干净。官方实现见
 `vendor/cordis/src/context.ts` 的 isolate 方法，学有余力时对照阅读。
 
 ## 4.7 跑一遍完整 demo
@@ -300,7 +293,7 @@ result = ctx.waterfall("tools/execute", {"name": "calculator"}, core_executor)
 uv run python chapters/04-services-scopes/src/demo.py
 ```
 
-完整输出（本地确定性运行）：
+完整输出，本地确定性运行：
 
 ```
 === 时刻 1：服务后到，插件自动醒来 ===
@@ -320,44 +313,46 @@ uv run python chapters/04-services-scopes/src/demo.py
   报错: 读取服务 "llm" 前必须在 inject 里声明
   ← 依赖显式化不是约定，是语法
 
-=== 时刻 4：洋葱瀑布 ===
+=== 时刻 4：waterfall ===
   [timeout-policy] 开始执行工具 calculator
   [core] 真正执行 calculator……
   [timeout-policy] 工具 calculator 完成
   最终结果: 计算结果: 42
 ```
 
-值得留意的细节：时刻 2 里 agent 打印了两次「启动！」——第二次是
-`tools-provider-2` 用新版本重新提供 tools 时，agent 的依赖签名变化触发的
-**热重载**（先卸载旧状态、再用新服务重新启动）。这正是 4.3 节签名里
-`version` 字段的作用：不只感知「有没有」，还感知「换没换」。
+一个细节：时刻 2 里 agent 打印了两次启动，第二次是 tools-provider-2
+用新版本重新提供 tools 时，agent 的依赖签名变化触发的热重载，先卸载旧状态、
+再用新服务重新启动。这正是 4.3 节签名里 `version` 字段的作用：不只感知有
+没有，还感知换没换。
 
-## 4.8 本章小结：亲手写了什么
+## 本章小结
 
-- `provide` / `get`：服务表 + 版本号 + 提供者注销联动
-- `inject` + `_recheck`：依赖签名（uid:version）、pending 等待、热重载、
-  依赖卸载级联
+- `provide` 与 `get`：服务表、版本号、提供者注销联动
+- `inject` 与 `_recheck`：依赖签名、pending 等待、热重载、依赖卸载级联
 - `__getattr__`：读服务必须先声明的语法级约束
-- `waterfall`：洋葱模型——可拦截、可改写、返回值沿链回传
-- 作用域 isolate：理解概念，教学版用「新 Context」简化，第 14 章兑现
+- `waterfall`：可拦截、可改写、返回值沿链回传
+- 作用域 isolate：理解概念，教学版用新 Context 简化，第 14 章兑现
 
-## 4.9 对照官方 DSH
+## 对照官方
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`vendor/cordis/src/reflect.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/vendor/cordis/src/reflect.ts) | `provide` / `_notify` | 官方 provide（第 277 行）与 notify（第 314 行）；官方 notify 按名字过滤、按作用域隔离，教学版全量重算 |
-| [`vendor/cordis/src/fiber.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/vendor/cordis/src/fiber.ts) | `_recheck` | 官方依赖解析 `_checkImpl` + epoch 比较 `_setEpoch`（fiber.ts 内部），签名机制一致 |
-| [`vendor/cordis/src/context.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/vendor/cordis/src/context.ts) | `__getattr__` | 官方 Proxy（第 74 行）+ reflect 的 get trap（第 144 行报错） |
-| [`vendor/cordis/src/events.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/vendor/cordis/src/events.ts) | `waterfall` | 官方瀑布（第 234-238 行）用 `cbs.shift() ?? inner` 迭代实现，与我们递归等价 |
+| [`vendor/cordis/src/reflect.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/vendor/cordis/src/reflect.ts) | `provide` 与 `_notify` | 官方 provide 在第 277 行，notify 在第 314 行；官方 notify 按名字过滤、按作用域隔离，教学版全量重算 |
+| [`vendor/cordis/src/fiber.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/vendor/cordis/src/fiber.ts) | `_recheck` | 官方依赖解析与 epoch 比较在 fiber.ts 内部，签名机制一致 |
+| [`vendor/cordis/src/context.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/vendor/cordis/src/context.ts) | `__getattr__` | 官方 Proxy 在第 74 行，reflect 的 get trap 在第 144 行报错 |
+| [`vendor/cordis/src/events.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/vendor/cordis/src/events.ts) | `waterfall` | 官方瀑布在第 234-238 行，用 `cbs.shift() ?? inner` 迭代实现，与我们递归等价 |
 
-## 4.10 练习
+## 练习
 
-1. **签名推演**：纸笔推演 demo 时刻 1 中 agent 的签名变化序列
-   （`None → "-,-" → "1:1,3:2"`，具体数字以实际 uid/version 为准），
-   每步标注触发的 notify 来源。
-2. **循环依赖**：写两个互相 inject 的插件（A 要 b，B 要 a），观察它们的
-   最终状态，解释为什么谁都启动不了；再想想官方会怎样处理这个问题。
-3. **双洋葱**：给 `tools/execute` 再挂一个「重试」监听器（失败时重试
-   一次核心执行器），观察两个监听器的包裹顺序与注册顺序的关系。
-4. **参数改写**：利用「`next()` 带参数即替换」的约定，写一个把工具名
-   大写后再传给内层的监听器，验证内层收到的参数确实被改写。
+1. **签名推演。** 纸笔推演 demo 时刻 1 中 agent 的签名变化序列，从 `None`
+   到 `"-,-"` 再到 `"uid:ver,uid:ver"`，每步标注触发的 notify 来源。推演完
+   与代码对照。
+2. **循环依赖。** 写两个互相 inject 的插件，A 要 b，B 要 a，观察它们的最终
+   状态，解释为什么谁都启动不了。官方会怎样处理这个问题？查官方文档验证
+   你的猜测。
+3. **双层 waterfall。** 给 `tools/execute` 再挂一个重试监听器，失败时重试一次
+   核心执行器，观察两个监听器的包裹顺序与注册顺序的关系。返回值如何穿过
+   两层回到调用方？
+4. **参数改写。** 利用 `next()` 带参数即替换的约定，写一个把工具名大写后再
+   传给内层的监听器，验证内层收到的参数确实被改写。这个能力在真实框架里
+   的用途是什么，举一个场景。

@@ -1,39 +1,37 @@
-# 16｜配置与 RPC：让 Agent 能被外部驱动
+# 16｜配置与 RPC
 
 > 预计时间：55 分钟 ｜ 前置：完成第 07 章 ｜ 本章纯本地运行，不调用模型
 
-一个完整的 Agent 框架不能只活在 `python demo.py` 里。真实的
-使用方式是：IDE 插件、命令行工具、网页前端**从进程外**驱动
-Agent——发消息、查状态、取结果。这带来本章的两个主题：
+一个完整的 Agent 框架不能只活在 python demo.py 里。真实的使用方式是：IDE
+插件、命令行工具、网页前端从进程外驱动 Agent，发消息、查状态、取结果。
+这带来本章的两个主题：
 
-1. **配置**：这些外部入口和 Agent 本体怎么共享同一套配置，
-   不互相矛盾？
-2. **RPC**：进程之间的「调用语言」长什么样，错误怎么表达？
+1. 配置：这些外部入口和 Agent 本体怎么共享同一套配置，不互相矛盾？
+2. RPC：进程之间的调用语言长什么样，错误怎么表达？
 
-官方把第二个主题做成了 Typert RPC 网关（`api/gateway`，第 5 行：
-「为 Host 与 Client 两侧的 Cordis 环境提供 Typert RPC endpoint」），
-教学版实现它的协议近亲 **JSON-RPC 2.0**——一个只有几页规范的
-极简标准，足够讲清「跨进程调用」的全部核心问题。
+官方把第二个主题做成了 Typert RPC 网关，api/gateway 文档第 5 行写明：为
+Host 与 Client 两侧的 Cordis 环境提供 Typert RPC endpoint。教学版实现它的
+协议近亲 JSON-RPC 2.0，一个只有几页规范的极简标准，足够讲清跨进程调用的
+全部核心问题。
 
-## 16.1 原理：配置为什么必须「分层」
+## 16.1 原理：配置为什么必须分层
 
-配置散落三处时，经典混乱是这样的：代码里写死模型名，`.env`
-里又一个模型名，命令行再传一个——同一次运行，三个地方给出
-三个答案。分层的解法是给每个来源一个**明确的优先级**：
+配置散落三处时，经典混乱是这样的：代码里写死模型名，.env 里又一个模型
+名，命令行再传一个，同一次运行，三个地方给出三个答案。分层的解法是给
+每个来源一个明确的优先级：
 
 ```
 显式覆盖（程序调用方传入）  >  .env 文件  >  默认值（代码内置）
 ```
 
-- **默认值兜底**：新用户零配置就能跑——默认值要选「大多数
-  情况下正确」的那个；
-- **`.env` 覆盖**：本地个性化（API Key 属于这一类），文件被
-  gitignore，不进版本库；
-- **显式覆盖**：调用方（比如 RPC 请求）带着明确意图传入，
-  最高优先。
+- 默认值兜底：新用户零配置就能跑，默认值要选大多数情况下正确的那个；
+- .env 覆盖：本地个性化，API Key 属于这一类，文件被 gitignore，不进
+  版本库；
+- 显式覆盖：调用方，比如 RPC 请求，带着明确意图传入，最高优先。
 
-读配置永远按这个顺序逐级回落，任何时刻「这个配置项的值是
-什么」只有一个答案。
+读配置永远按这个顺序逐级回落，任何时刻这个配置项的值是什么只有一个
+答案。官方 settings 服务同样是分层解析：schema 默认值，然后组合的 base，
+最后用户文档分节。
 
 ## 16.2 Settings：三层逐级回落
 
@@ -56,28 +54,28 @@ class Settings:
         return default
 ```
 
-三层结构各存各的，`get` 按优先级逐级回落——一眼能看懂，
-也一眼能验证。`_load_env` 的解析与第 01 章 `load_api_key`
-同一套规则（跳过注释与空行、剥引号），此处不再重复。
+三层结构各存各的，`get` 按优先级逐级回落，一眼能看懂，也一眼能验证。
+`_load_env` 的解析与第 01 章 load_api_key 同一套规则，跳过注释与空行、
+剥引号。
 
 ## 16.3 JSON-RPC 2.0：跨进程调用的最小语言
 
-进程 A 想调用进程 B 的一个方法，线上只传文本。JSON-RPC 2.0
-把这个「对话」规定成两种消息：
+进程 A 想调用进程 B 的一个方法，线上只传文本。JSON-RPC 2.0 把这个对话
+规定成两种消息：
 
 ```json
 { "jsonrpc": "2.0", "id": 1, "method": "settings.get", "params": {"key": "MODEL"} }
 { "jsonrpc": "2.0", "id": 1, "result": "deepseek-chat" }
 ```
 
-- **请求**：`method` 要调什么、`params` 传什么、`id` 是本次
-  调用的编号（响应原样带回，异步时对得上号）；
-- **响应**：要么 `result`（成功），要么 `error`（失败）——
-  **错误也是响应**，绝不靠「对端崩了」来表达失败。
+- 请求：method 要调什么、params 传什么、id 是本次调用的编号，响应
+  原样带回，异步时对得上号；
+- 响应：要么 result 成功，要么 error 失败。错误也是响应，绝不靠对端
+  崩了来表达失败。
 
-错误有标准错误码：`-32700` 解析失败、`-32600` 请求不合法、
-`-32601` 方法不存在、`-32602` 参数不合法。对端拿到数字就能
-程序化地分类处理，不用解析错误文本。
+错误有标准错误码：-32700 解析失败、-32600 请求不合法、-32601 方法不
+存在、-32602 参数不合法。对端拿到数字就能程序化地分类处理，不用解析
+错误文本。
 
 ## 16.4 RpcDispatcher：解析、路由、结构化错误
 
@@ -102,10 +100,10 @@ def parse_request(text: str) -> RpcRequest | RpcError:
     return RpcRequest(jsonrpc="2.0", id=data.get("id"), method=method, params=params)
 ```
 
-值得注意的设计：**所有校验失败都返回结构化错误，而不是抛异常
-让对端崩溃**。RPC 的边界就是信任边界——对端发来的任何文本都
-可能畸形（手滑、坏程序、恶意构造），解析层必须把它们全部
-转成合法的错误响应。`dispatch` 的路由部分同理：
+一个设计贯穿全章：所有校验失败都返回结构化错误，而不是抛异常让对端
+崩溃。RPC 的边界就是信任边界，对端发来的任何文本都可能畸形，手滑、坏
+程序、恶意构造，解析层必须把它们全部转成合法的错误响应。dispatch 的
+路由部分同理：
 
 ```python
     def dispatch(self, text: str) -> dict[str, Any]:
@@ -130,11 +128,10 @@ def parse_request(text: str) -> RpcRequest | RpcError:
         return {"jsonrpc": "2.0", "id": parsed.id, "result": result}
 ```
 
-三层防御：解析失败（对端的问题）→ 方法不存在（调用方的问题）
-→ 处理器抛错（我们的问题，`INTERNAL_ERROR` 兜底）。任何路径
-都有响应——这就是官方网关 `invoke` 的同一套思想（api-gateway
-第 9 行：「校验具名参数是否完全匹配……调用公开的业务方法，
-并校验其结果」），把「边界」变成「全响应」。
+三层防御：解析失败是对端的问题，方法不存在是调用方的问题，处理器抛错
+是这里的问题，INTERNAL_ERROR 兜底。任何路径都有响应。官方网关 invoke
+是同一套思想，api/gateway 文档第 9 行写明：每次调用都校验具名参数是否
+完全匹配，调用公开的业务方法，并校验其结果。把边界变成全响应。
 
 ## 16.5 跑一遍完整 demo
 
@@ -142,7 +139,7 @@ def parse_request(text: str) -> RpcRequest | RpcError:
 uv run python chapters/16-settings-jsonrpc/src/demo.py
 ```
 
-完整输出（本地确定性运行）：
+完整输出，本地确定性运行：
 
 ```
 === ① 分层配置 ===
@@ -166,40 +163,37 @@ uv run python chapters/16-settings-jsonrpc/src/demo.py
   ← {"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": "Parse error: 不是合法 JSON"}}
 ```
 
-五条请求各演示一条路径：正常取值、正常回声、未知方法、参数
-类型错误、缺协议版本、彻底不是 JSON。每一条都得到结构化
-响应——包括最后两条「垃圾输入」。
+六条请求各演示一条路径：正常取值、正常回声、未知方法、参数类型错误、缺
+协议版本、彻底不是 JSON。每一条都得到结构化响应，包括最后两条垃圾输入。
 
-## 16.6 本章小结：亲手写了什么
+## 本章小结
 
-- `Settings`：显式覆盖 > .env > 默认值的三层回落
+- `Settings`：显式覆盖、.env、默认值的三层回落
 - `parse_request`：JSON-RPC 2.0 线格式校验，失败即结构化错误
-- `RpcDispatcher`：注册/路由/三层防御（解析→方法→处理器）
+- `RpcDispatcher`：注册、路由、三层防御
 - 标准错误码五件套
 
-## 16.7 对照官方 DSH
+## 对照官方
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/api/gateway/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/api/gateway/README.zh.md) | `RpcDispatcher` | 官方 Host/Client 两侧的 Typert RPC endpoint（第 5 行）；invoke 校验参数、调用业务方法并校验结果（第 9 行）——思想与本章一致，协议换成了更简单的 JSON-RPC |
-| [`packages/settings/settings/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/settings/settings/README.zh.md) | `Settings` | 官方统一配置服务；官方还有 schema 校验与 describe 遮蔽机密值（role secret），教学版只做三层回落 |
+| [`packages/api/gateway/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/api/gateway/README.zh.md) | `RpcDispatcher` | 官方 Typert RPC endpoint 在第 5 行；invoke 校验参数、调用业务方法并校验结果在第 9 行，思想与本章一致，协议换成更简单的 JSON-RPC |
+| [`packages/settings/settings/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/settings/settings/README.zh.md) | `Settings` | 官方分层解析在默认值、base、用户文档三层（第 5 行）；官方还有 schema 校验与 describe 脱敏机密值（第 12 行），教学版只做三层回落 |
 
-官方用 Typert（生成式 RPC 协议）而非 JSON-RPC 的动机值得了解：
-方法签名由 TypeScript 类型**生成**，两端共享同一份描述符，
-参数校验在编译期就锁死——比运行时手写校验更不容易出错。
-教学版用 JSON-RPC 是为了把「跨进程调用」的核心问题（线格式、
-错误表达、信任边界）用最小面积讲清。
+官方用 Typert 而非 JSON-RPC 的动机：方法签名由 TypeScript 类型生成，两端
+共享同一份描述符，参数校验在编译期就锁死，比运行时手写校验更不容易出错。
+教学版用 JSON-RPC 是为了把跨进程调用的核心问题，线格式、错误表达、信任
+边界，用最小面积讲清。
 
-## 16.8 练习
+## 练习
 
-1. **优先级验证**：把 demo 里的显式覆盖删掉，重跑，观察 MODEL
-   回落到 .env 值；再删掉 .env 里的 MODEL，观察回落到默认值。
-2. **通知语义**：JSON-RPC 2.0 规定 `id` 为 null 的请求是
-   「通知」（无需响应）。给 dispatcher 加这个规则：id 为 null
-   时执行但不返回响应，并讨论它的适用场景（心跳、日志上报）。
-3. **批量请求**：JSON-RPC 2.0 支持数组形式的批量请求（一次
-   发多条，一次回多条）。实现 `dispatch_batch`，注意单条失败
-   不影响其他条。
-4. **错误即数据**：把 demo 的六条往返看成「协议测试用例」，
-   为每一对 (请求, 预期响应) 写一个断言——体会结构化错误
-   对自动化测试的友好（无需解析文本就能断言错误码）。
+1. **优先级验证。** 把 demo 里的显式覆盖删掉，重跑，观察 MODEL 回落到
+   .env 值；再删掉 .env 里的 MODEL，观察回落到默认值。
+2. **通知语义。** JSON-RPC 2.0 规定 id 为 null 的请求是通知，无需响应。
+   给 dispatcher 加这个规则：id 为 null 时执行但不返回响应，并讨论它
+   的适用场景，心跳、日志上报。
+3. **批量请求。** JSON-RPC 2.0 支持数组形式的批量请求，一次发多条，
+   一次回多条。实现 dispatch_batch，单条失败不影响其他条。
+4. **错误即数据。** 把 demo 的六条往返看成协议测试用例，为每一对请求
+   与预期响应写一个断言，体会结构化错误对自动化测试的友好，无需解析
+   文本就能断言错误码。

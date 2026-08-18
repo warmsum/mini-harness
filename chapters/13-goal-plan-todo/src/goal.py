@@ -1,11 +1,11 @@
 """第 13 章：Goal —— 长任务的目标状态机。
 
-对应官方 packages/goal/goal。核心语义（goal-goal/README.zh.md）：
-1. 事件溯源：目标状态以 goal/change 事件进入会话日志，日志是唯一持久权威（:24）；
-2. 单一目标：最多只有一个当前目标，revision 从 1 开始（:22）；
+对应官方 packages/goal/goal。核心语义（packages/goal/goal）：
+1. 事件溯源：目标状态以 goal/change 事件进入会话日志，日志是唯一持久权威（文档第 24 行）；
+2. 单一目标：最多只有一个当前目标，revision 从 1 开始（文档第 22 行）；
 3. 动词集合：create / edit / pause / resume / complete / block；
-4. 变更经 revision 比较并设置防护（Compare-and-Swap），拒绝陈旧引用（:20）；
-5. 续行启用状态绝不持久化：会话恢复后必须显式 resume（:28）。
+4. 变更经 revision 比较并设置防护（Compare-and-Swap），拒绝陈旧引用（文档第 20 行）；
+5. 续行启用状态绝不持久化：会话恢复后必须显式 resume（文档第 28 行）。
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ class GoalStore:
 
     def create(self, objective: str, max_rounds: int = 30) -> GoalRef:
         """创建目标。官方：最多只有一个当前目标；create 生成
-        revision=1、phase=active 的目标并启用续行（:22）。"""
+        revision=1、phase=active 的目标并启用续行（文档第 22 行）。"""
         if self._current is not None and self._current.phase != PHASE_COMPLETED:
             raise ValueError("已有进行中的目标：必须先 complete 或 clear")
         goal = Goal(
@@ -82,7 +82,7 @@ class GoalStore:
         return GoalRef(id=goal.id, revision=goal.revision)
 
     def edit(self, ref: GoalRef, objective: str) -> GoalRef:
-        """编辑目标文本。官方：编辑保留 phase、blocker reason 与 activation（:22）。"""
+        """编辑目标文本。官方：编辑保留 phase、blocker reason 与 activation（文档第 22 行）。"""
         current = self._require(ref)
         goal = Goal(
             id=current.id,
@@ -103,7 +103,7 @@ class GoalStore:
 
     def resume(self, ref: GoalRef) -> GoalRef:
         """恢复。官方：只有配置的 Round 上限仍有剩余容量时，resume 才接受
-        已停止 phase 或 phase=active 但已停用续行的目标；清除 blocker reason（:22）。"""
+        已停止 phase 或 phase=active 但已停用续行的目标；清除 blocker reason（文档第 22 行）。"""
         current = self._require(ref)
         if current.rounds_started >= current.max_rounds:
             raise ValueError("目标轮次已达上限，无法 resume")
@@ -117,14 +117,14 @@ class GoalStore:
 
     def block(self, ref: GoalRef, reason: str) -> GoalRef:
         """阻塞：记录策略代码与规范化文本说明（教学版只留文本）。
-        官方：阻塞会停用续行，只记录一个持久 phase（:22）。"""
+        官方：阻塞会停用续行，只记录一个持久 phase（文档第 22 行）。"""
         current = self._require(ref)
         self._commit(self._with_phase(current, PHASE_BLOCKED, reason))
         return GoalRef(id=current.id, revision=current.revision + 1)
 
     def admit_round(self) -> GoalRef:
         """接纳一个目标轮次（官方：只有来源为 goal 且已准入的
-        user/message 事件会推进正数 Round，:26）。
+        user/message 事件会推进正数 Round，文档第 26 行）。
         与其他动词一致：返回新引用，旧引用随之失效。"""
         if self._current is None or self._current.phase != PHASE_ACTIVE:
             raise ValueError("没有 active 目标，无法接纳轮次")
@@ -170,7 +170,7 @@ class GoalStore:
         )
 
     def _commit(self, goal: Goal) -> None:
-        """每次变更追加 goal/change 事件（携带变更后的完整快照，:24）。"""
+        """每次变更追加 goal/change 事件（携带变更后的完整快照，文档第 24 行）。"""
         self._current = goal
         self._session.append("goal/change", _goal_to_dict(goal))
 
@@ -179,7 +179,7 @@ class GoalStore:
         """严格回放：只从 goal/change 事件派生状态。
 
         revision 连续性只在同一目标内检查——每个新目标（id 不同）
-        的 revision 都从 1 重新开始（官方 :22 create 生成 revision=1）。"""
+        的 revision 都从 1 重新开始（文档第 22 行，create 生成 revision=1）。"""
         store = cls(session)
         for event in session.events:
             if event.type != "goal/change":

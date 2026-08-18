@@ -1,9 +1,9 @@
 """第 16 章：JSON-RPC 2.0 —— 让外部程序驱动 Agent。
 
 对应官方 packages/api/gateway（Host 与 Client 两侧的 Typert RPC
-endpoint，:5「Host 入口提供 ctx.typertGateway……两者使用同一份
-生成的 InvocationDescriptor 约定」）。教学版实现 JSON-RPC 2.0 的
-最小对接口：请求/响应/错误的线格式 + 方法分发器。
+endpoint，文档第 5 行：两者使用同一份生成的 InvocationDescriptor
+约定）。教学版实现 JSON-RPC 2.0 的最小对接口：请求/响应/错误的
+线格式 + 方法分发器。
 
 为什么 Agent 框架需要 RPC 接口？IDE 插件、CLI、网页前端都要
 从「进程外」控制 Agent——发消息、读状态、取结果。RPC 就是
@@ -71,7 +71,7 @@ class RpcDispatcher:
     """方法分发器：注册处理器，按 method 路由。
 
     对应官方 gateway 的 invoke：解析描述符、校验参数、调用公开
-    业务方法并校验结果（api-gateway :9）。"""
+    业务方法并校验结果（api/gateway 文档第 9 行）。"""
 
     def __init__(self) -> None:
         self._handlers: dict[str, Callable[[dict[str, Any]], Any]] = {}

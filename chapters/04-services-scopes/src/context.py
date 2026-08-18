@@ -4,7 +4,7 @@
 1. `provide` / `get` —— 服务的注册与查找
 2. `inject` 依赖声明 —— 依赖未齐时插件保持 pending，服务后到自动启动
 3. `__getattr__` 严格访问 —— 读服务必须先声明依赖
-4. `waterfall` —— 洋葱模型事件（可拦截管线）
+4. `waterfall` —— waterfall 模型事件（可拦截管线）
 
 对应官方 vendor/cordis 的 reflect（服务）与 events（瀑布）模块。
 """
@@ -207,7 +207,7 @@ class Context:
             listener(*args)
 
     def waterfall(self, event: str, *args: Any) -> Any:
-        """洋葱模型事件。最后一个参数是 next（最内层执行器）。
+        """waterfall 模型事件。最后一个参数是 next（最内层执行器）。
 
         每个监听器收到 (…args, next)；调 next() 继续向里传，返回值沿链
         回传。监听器调 next() 不带参数时，原参数原样向下传；带参数则用

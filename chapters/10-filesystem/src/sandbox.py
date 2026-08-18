@@ -42,7 +42,7 @@ class SandboxPolicy:
 
     def writable_roots(self) -> list[Path]:
         """可写根目录集合：工作区根 + 平台临时目录。
-        （对应官方 :16 的 writableRoots 派生集合。）"""
+        （对应官方文档第 16 行的 writableRoots 派生集合。）"""
         return [
             self.workspace_root,
             Path(tempfile.gettempdir()),
@@ -54,7 +54,7 @@ class SandboxPolicy:
 
         规范化（resolve）是核心——攻击路径 `workspace/../etc/passwd`
         在词法上逃出工作区，resolve 后无处遁形。
-        诚实边界：这是「约束」而非「安全边界」（官方 :21 原话），
+        诚实边界：这是「约束」而非「安全边界」（官方文档第 21 行），
         真正的内核级隔离属于第 11 章的 shell 沙箱。"""
         if self.mode == DANGER_FULL_ACCESS:
             return target
@@ -71,7 +71,7 @@ class SandboxPolicy:
 
 def approve_escalation(policy: SandboxPolicy, requested: str) -> SandboxPolicy:
     """审批升级：请求更宽模式，只有「严格更宽」才可能获批。
-    教学版默认拒绝（无审批通道 fail closed）；第 11 章接上真实审批。"""
+    教学版没有人工审批通道，按表直接放行；第 11 章接上真实审批询问。"""
     if requested in WIDER_MODES[policy.mode]:
         return SandboxPolicy(mode=requested, workspace_root=policy.workspace_root)
     raise SandboxDeniedError(

@@ -70,7 +70,7 @@ class TokenMeter:
         self.context_window = context_window
 
     def measure(self, messages: list[Message], tools: list[Any] | None = None) -> Measurement:
-        """计量一段会话：消息面 + 工具信封。"""
+        """计量一段会话：消息面 + 工具的 envelope。"""
         metered = [
             {
                 "role": m.role,

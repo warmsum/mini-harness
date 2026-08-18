@@ -35,8 +35,8 @@ class JsonlStore:
         原子发布的关键：先写临时文件，写完再 os.replace 换名。
         os.replace 在同一文件系统内是原子操作——任何时刻打开目标
         路径，看到的要么是完整的旧文件、要么是完整的新文件，
-        绝不存在写了一半的状态。（官方 :43 用硬链接发布 + fsync
-        达成同样效果，教学版用 os.replace 的等价语义。）
+        绝不存在写了一半的状态。（官方文档第 43 行用硬链接无覆盖
+        发布 + fsync 达成同样效果，教学版用 os.replace 的等价语义。）
         """
         lines = [
             json.dumps({"format": HEADER_FORMAT, "version": HEADER_VERSION}, ensure_ascii=False)

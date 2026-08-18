@@ -41,11 +41,9 @@ def main() -> None:
     ref = store.create("把内部工具迁移到新框架", max_rounds=5)
     print("  create → ")
     show_goal(store)
-    show_goal(store)
 
     store.admit_round()  # 模拟一轮目标工作完成
     print("  admit_round → ")
-    show_goal(store)
     show_goal(store)
     ref = store.get_ref()  # 轮次推进后旧引用已失效，重新取引用
 
