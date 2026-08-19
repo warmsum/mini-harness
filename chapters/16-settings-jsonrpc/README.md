@@ -80,6 +80,10 @@ class Settings:
 
 错误有标准错误码：-32700 解析失败、-32600 请求不合法、-32601 方法不存在、-32602 参数不合法。对端拿到数字就能程序化地分类处理，不用解析错误文本。
 
+`RpcError` 还带一个可选的 `request_id`。彻底无法解析、无法确认请求身份时
+响应 id 为 null；请求结构和 id 已经有效、只是 params 类型错误时，错误响应
+必须原样带回该 id，调用方才能把失败对应到正确请求。
+
 ## 16.4 RpcDispatcher：解析、路由、结构化错误
 
 ```python
@@ -99,7 +103,11 @@ def parse_request(text: str) -> RpcRequest | RpcError:
     if params is None:
         params = {}
     if not isinstance(params, dict):
-        return RpcError(INVALID_PARAMS, "Invalid params: 必须是 JSON 对象")
+        return RpcError(
+            INVALID_PARAMS,
+            "Invalid params: 必须是 JSON 对象",
+            request_id=data.get("id"),
+        )
     return RpcRequest(jsonrpc="2.0", id=data.get("id"), method=method, params=params)
 ```
 
@@ -109,7 +117,7 @@ def parse_request(text: str) -> RpcRequest | RpcError:
     def dispatch(self, text: str) -> dict[str, Any]:
         parsed = parse_request(text)
         if isinstance(parsed, RpcError):
-            return _error_response(None, parsed)
+            return _error_response(parsed.request_id, parsed)
         handler = self._handlers.get(parsed.method)
         if handler is None:
             return _error_response(
@@ -153,7 +161,7 @@ uv run python chapters/16-settings-jsonrpc/src/demo.py
   → {"jsonrpc": "2.0", "id": 3, "method": "unknown.tool", "params": {}}
   ← {"jsonrpc": "2.0", "id": 3, "error": {"code": -32601, "message": "Method not found: unknown.tool"}}
   → {"jsonrpc": "2.0", "id": 4, "method": "echo", "params": [1, 2]}
-  ← {"jsonrpc": "2.0", "id": null, "error": {"code": -32602, "message": "Invalid params: 必须是 JSON 对象"}}
+  ← {"jsonrpc": "2.0", "id": 4, "error": {"code": -32602, "message": "Invalid params: 必须是 JSON 对象"}}
   → {"id": 5, "method": "echo", "params": {"text": "缺 jsonrpc 版本"}}
   ← {"jsonrpc": "2.0", "id": null, "error": {"code": -32600, "message": "Invalid Request: jsonrpc 必须为 2.0"}}
   → 这不是 JSON{{{
@@ -174,8 +182,8 @@ uv run python chapters/16-settings-jsonrpc/src/demo.py
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/api/gateway/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/api/gateway/README.zh.md) | `RpcDispatcher` | 官方 Typert endpoint 会按 descriptor 校验具名参数和返回值；教学版用更小的 JSON-RPC 运行时校验说明协议边界 |
-| [`packages/settings/settings/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/settings/settings/README.zh.md) | `Settings` | 对齐 namespace、三层解析、深冻结快照、update/replace、revision 冲突和 JSON 校验 |
+| [`packages/api/gateway/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/api/gateway/README.zh.md) | `RpcDispatcher` | 官方 Typert endpoint 会按 descriptor 校验具名参数和返回值；教学版用更小的 JSON-RPC 运行时校验说明协议边界 |
+| [`packages/settings/settings/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/settings/settings/README.zh.md) | `Settings` | 对齐 namespace、三层解析、深冻结快照、update/replace、revision 冲突和 JSON 校验 |
 
 官方还支持 `mutate` 路径操作、secret 脱敏描述、异步顺序 watcher、可写 provider、文件热重载和卸载排空；教学版不实现这些工程能力。官方用 Typert 而非 JSON-RPC：两端共享方法 descriptor，参数和返回值都由 schema 校验。教学版的手写 JSON-RPC 只是用最小面积讲清线格式、错误表达和信任边界，不与 Typert wire 兼容。
 

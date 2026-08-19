@@ -21,7 +21,7 @@ Calling a large language model once is straightforward: send a message, wait for
 
 [DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness) (DSH) provides a complete agent runtime built around these questions. Its TypeScript monorepo contains more than a hundred packages. A Python developer reading it for the first time must often learn the language, the repository structure, and the agent mechanisms at the same time. That makes it easy to lose sight of the system itself.
 
-mini-harness turns the core DSH mechanisms into 17 Python chapters. The course begins with a minimal streaming model call, then adds tools, sessions, prompt assembly, persistence, context compaction, filesystem and shell access, skills, sub-agents, and web search. The final chapter assembles these pieces into an agent that accepts a task, persists its session, and returns a result.
+mini-harness turns the core DSH mechanisms into 17 Python chapters. The course begins with a minimal streaming model call, then adds tools, sessions, prompt assembly, persistence, context compaction, filesystem and shell access, skills, sub-agents, and web search. The final chapter assembles the main execution path into a headless agent that accepts a task, persists its session, and returns a result.
 
 The course focuses on the headless execution path. Here, headless means that no web page, desktop interface, or HTTP service is started. A program receives a task, runs the agent and its tools, and writes the result to standard output. This keeps the agent's main execution path visible from a terminal.
 
@@ -32,13 +32,13 @@ After completing the course, learners will be able to explain and implement:
 - how session events are recorded, projected, persisted, recovered, and compacted;
 - how plugins and services start from declared dependencies and clean up in reverse order;
 - how filesystem, shell, skills, goals, todo lists, and sub-agents connect to the runtime loop;
-- how a headless agent settles configuration, runs a task, flushes state, and returns a final result.
+- how a headless agent is assembled, runs a task, flushes state, and returns a final result.
 
 ## Who this course is for
 
 The course is written for developers and self-directed learners who know basic Python and want to understand how an agent runtime works internally. The only prerequisites are familiarity with functions, classes, dictionaries, and exceptions, plus a basic idea of how an application calls an LLM API. No TypeScript experience or previous agent-framework knowledge is required.
 
-The code uses `async / await`, dataclasses, generators, and JSON serialization throughout the chapters. Each concept is introduced when it first becomes useful, so a separate course on asynchronous programming or Python's type system is not required beforehand.
+The code uses `async / await`, dataclasses, generators, and JSON serialization where they help explain a mechanism. Each concept is introduced when it first becomes useful, so a separate course on asynchronous programming or Python's type system is not required beforehand.
 
 ## Quick start
 
@@ -64,7 +64,7 @@ uv sync
 uv run python chapters/01-streaming-agent/src/demo.py
 ```
 
-`.env` is covered by the repository's Git ignore rules. Live chapters look for `DEEPSEEK_API_KEY` in the process environment first and fall back to the repository-level `.env` file. Launch-level settings such as `DEEPSEEK_BASE_URL` and `DSH_MODEL` belong in the process environment; the official DSH launcher rejects these settings when they are placed in `.env`.
+`.env` is covered by the repository's Git ignore rules. Live chapters look for `DEEPSEEK_API_KEY` in the process environment first and fall back to the repository-level `.env` file. mini-harness reads only the key from this source; each chapter keeps its model and endpoint in code. When running official DSH, launch-level settings such as `DEEPSEEK_BASE_URL` and `DSH_MODEL` belong in the process environment because the official launcher rejects them in `.env`.
 
 One command runs all 17 chapters. Nine of them access the DeepSeek API and consume model usage:
 
@@ -92,7 +92,7 @@ An agent gains more capabilities as it grows. The plugin system coordinates thei
 | Chapter | Core question | Runtime |
 |---|---|---|
 | [03 · A minimal plugin system](chapters/03-python-cordis/README.md) | How does a plugin wait for dependencies, become active, and release its resources? | Local |
-| [04 · Services and dependencies](chapters/04-services-scopes/README.md) | How are services provided, shadowed, and resolved again, and why does strict access expose dependency errors? | Local |
+| [04 · Services and dependencies](chapters/04-services-scopes/README.md) | How are services provided, duplicate names rejected, and dependencies resolved again after a provider changes? | Local |
 
 ### Part III: Build a persistent agent runtime
 
@@ -102,7 +102,7 @@ A single model call handles one request. A persistent agent also needs to record
 |---|---|---|
 | [05 · Session log](chapters/05-session-log/README.md) | How does an append-only event log reconstruct messages and preserve each run? | DeepSeek API |
 | [06 · Request envelope assembly](chapters/06-prompt-tools/README.md) | How do the system prompt, message history, and tool schemas become one model request? | DeepSeek API |
-| [07 · Resident agent and inbox](chapters/07-agent-inbox/README.md) | How do followup, steer, and inject messages enter an active turn and step? | DeepSeek API |
+| [07 · Resident agent and inbox](chapters/07-agent-inbox/README.md) | How do followup and steer target the next turn and the next step of the current turn? | DeepSeek API |
 | [08 · Session persistence](chapters/08-persistence/README.md) | How is a JSONL log published safely and recovered after a process restart? | Local |
 | [09 · Context engineering](chapters/09-context-engineering/README.md) | How does the runtime estimate token pressure and replace older history with a summary? | DeepSeek API |
 
@@ -121,16 +121,16 @@ Once the runtime loop is in place, the agent can interact with the local environ
 
 ### Part V: Assemble the runtime boundary
 
-The final two chapters define the system boundary. Configuration and RPC receive external requests; the headless entry point turns the preceding mechanisms into one complete run.
+The final two chapters approach the system boundary from different directions. Chapter 16 teaches settings and RPC independently; chapter 17 assembles a command-line runner. The current capstone does not wire chapter 16's Settings or RPC into that command.
 
 | Chapter | Core question | Runtime |
 |---|---|---|
 | [16 · Settings and RPC](chapters/16-settings-jsonrpc/README.md) | How are layered settings settled, and how does JSON-RPC validate and dispatch requests? | Local |
-| [17 · Headless assembly](chapters/17-headless-capstone/README.md) | How do configuration, the agent, session persistence, and result settlement become a command-line program? | DeepSeek API |
+| [17 · Headless assembly](chapters/17-headless-capstone/README.md) | How do the client, agent, session persistence, and result settlement become a command-line program? | DeepSeek API |
 
 ## How one task moves through the system
 
-Chapters 01, 02, 05, 06, 07, 08, 09, and 17 form the main execution path. The diagram follows an ordinary task from the user's input to the final process result:
+Chapters 01, 02, 05, 06, 07, 08, 09, and 17 form the main execution path. The solid edges below are wired in chapter 17; compaction is demonstrated independently in chapter 09 and remains an integration point:
 
 ```mermaid
 flowchart TB
@@ -142,8 +142,8 @@ flowchart TB
     TOOLS -->|tool result| LOOP
     LOOP --> LOG[Chapter 05 session log<br>append events and project messages]
     LOG --> METER[Chapter 09 token metering]
-    METER -->|above threshold| COMPACT[Chapter 09 compaction<br>replace older history with a summary]
-    COMPACT --> LOG
+    METER -.->|optional extension| COMPACT[Chapter 09 compaction<br>not wired into chapter 17]
+    COMPACT -.-> LOG
     LOG --> PERSIST[Chapter 08 persistence<br>write JSONL]
     PERSIST --> OUT[Chapter 17 result settlement<br>stdout and exit code]
 ```
@@ -152,7 +152,7 @@ Chapters 03 and 04 provide plugin and dependency management, chapters 10 and 11 
 
 ## How each chapter works
 
-Each chapter begins with one concrete problem. The tutorial then moves through the runtime flow, complete code, a guided walkthrough, real output, references to the official source, and exercises. The chapter's `src/` directory contains its complete implementation. Core logic is not hidden behind an imported teaching package, so the code remains directly traceable to the explanation.
+Each chapter begins with one concrete problem. The tutorial then moves through the runtime flow, key code, a guided walkthrough, real output, references to the official source, and exercises. The chapter's `src/` directory contains its complete implementation. Core logic is not hidden behind an imported teaching package, so the code remains directly traceable to the explanation.
 
 The full route runs from chapter 01 through chapter 17. A shorter preview is 01, 02, 09, and 17: chapter 01 establishes the model connection, chapter 02 closes the smallest agent loop, chapter 09 handles long context, and chapter 17 shows the assembled program.
 
@@ -173,14 +173,14 @@ The course aligns with DSH behavior, data flow, and lifecycle rather than TypeSc
 | Proxy-based property access | `__getattr__` | Fail immediately when an undeclared service is read |
 | Fiber state machine and cascade cleanup | `PluginHandle` state machine and reverse-order cleanup | Preserve plugin startup, active, failure, and disposal states |
 | Epoch recomputation and notify | Dependency signatures and a full rescan | Re-evaluate whether plugins can start after a service changes |
-| Waterfall events | Recursive `waterfall` dispatch | Pass each handler's result to the next handler |
+| Waterfall events | Recursive `waterfall` dispatch | Wrap the core executor in middleware and return results outward |
 | Promise concurrency | `ThreadPoolExecutor` | Run child agents concurrently and collect results by task |
 | Discriminated unions | Frozen dataclass unions | Represent message and event variants explicitly |
 | Frozen JSON snapshots | Recursive validation and freezing | Keep log data stable enough to serialize and replay |
 
 ## Official source baseline
 
-The course checks its mechanisms and terminology against the official DeepSeek Harness source. The current audit baseline is commit [`99f6f02fecdb7dff40c3fbc9470f5907c29f74ca`](https://github.com/deepseek-ai/DeepSeek-Harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca), dated 2026-08-17 and released as `0.1.0-rc.7`. Pinning the source keeps every conclusion reproducible. Each chapter identifies the upstream source, the semantics retained in Python, and the engineering features intentionally omitted for teaching.
+The course checks its mechanisms and terminology against the official DeepSeek Harness source. The current audit baseline is commit [`141eb6fef83422698aef7a981029e843e8161534`](https://github.com/deepseek-ai/DeepSeek-Harness/tree/141eb6fef83422698aef7a981029e843e8161534), dated 2026-08-19 and released as `0.1.0-rc.8`. Pinning the source keeps every conclusion reproducible. Each chapter identifies the upstream source, the semantics retained in Python, and the engineering features intentionally omitted for teaching.
 
 <details>
 <summary><strong>Open the source map for all 17 chapters</strong></summary>
@@ -201,7 +201,7 @@ The course checks its mechanisms and terminology against the official DeepSeek H
 | 12 | Skill registry and progressive loading | `packages/skill/skill`, `packages/skill/tool-skill` |
 | 13 | Goal and todo | `packages/goal/goal`, `packages/todo/tool-todo` |
 | 14 | Subagent providers and delegation | `packages/subagent/subagent`, `packages/subagent/tool-subagent` |
-| 15 | Web capability seam | `packages/web/web-search-deepseek`, `packages/web/tool-web` |
+| 15 | Web capability seam | `packages/web/tool-web`, `packages/web/web-search-deepseek`, `packages/web/web-fetch-http` |
 | 16 | Settings and Typert gateway | `packages/settings/settings`, `packages/api/gateway` |
 | 17 | Headless runner | `packages/bundle/headless` |
 
@@ -213,7 +213,7 @@ The course checks its mechanisms and terminology against the official DeepSeek H
 mini-harness/
 ├── chapters/
 │   ├── 01-streaming-agent/
-│   │   ├── README.md      # problem, principle, full code, output, references, exercises
+│   │   ├── README.md      # problem, principle, key code, output, references, exercises
 │   │   └── src/           # complete implementation for this chapter and demo.py
 │   ├── ...
 │   └── 17-headless-capstone/
@@ -225,7 +225,7 @@ mini-harness/
 
 ## Safety boundary
 
-The filesystem and shell chapters use read-only permissions by default. Writes and shell commands require explicit authorization or approval. Paths are normalized before allowed-root checks, and command execution includes timeouts and result collection. These mechanisms reduce accidental changes during local experiments.
+The filesystem and shell chapters demonstrate their permission modes explicitly. Chapter 10 uses `workspace-write` inside a temporary workspace to exercise the write fence; chapter 11 starts in `read-only` and then demonstrates approval and one-shot grants. Paths are normalized before allowed-root checks, and command execution includes timeouts and result collection.
 
 The path fence still runs inside an ordinary Python process and does not replace an operating-system sandbox. Child processes retain the permissions of the current user. The course also leaves out the graphical interface, HTTP service, hot reload, and cloud isolation because they are outside the headless execution path covered here.
 

@@ -1,6 +1,6 @@
 """第 15 章：真实的外部能力 —— Web Search 与网页抓取。
 
-对应官方 packages/web/web-search-deepseek 与 tool-web。
+对应官方 packages/web/tool-web、web-search-deepseek 与 web-fetch-http。
 官方实现的真相（web-search-deepseek/README.zh.md）：
 DeepSeek 没有专用搜索端点，Web Search 是一次携带 web_search
 服务器工具的「Anthropic 兼容 Messages API」完整模型调用——
@@ -14,7 +14,9 @@ DeepSeek 没有专用搜索端点，Web Search 是一次携带 web_search
 from __future__ import annotations
 
 import re
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from typing import cast
 
 import httpx
 
@@ -23,6 +25,7 @@ SEARCH_BASE_URL = "https://api.deepseek.com/anthropic/v1"
 SEARCH_MODEL = "deepseek-v4-flash"
 ANTHROPIC_VERSION = "2023-06-01"
 WEB_SEARCH_TOOL = "web_search_20250305"
+SEARCH_MAX_QUERIES = 4
 
 
 @dataclass(frozen=True)
@@ -37,7 +40,7 @@ class WebSource:
 
 @dataclass(frozen=True)
 class WebSearchResult:
-    """一次搜索的结构化结果（对应官方 WebSearchResult 的简化版）。"""
+    """一条查询或一批查询合并后的结果（官方 WebSearchResult 的简化版）。"""
 
     sources: tuple[WebSource, ...]
     truncated: bool = False
@@ -65,13 +68,58 @@ class WebSearchClient:
         self.model = model
 
     def search(
-        self, query: str, max_results: int = 5, max_uses: int = 5
+        self,
+        queries: list[str],
+        max_results: int = 5,
+        max_uses: int = 5,
+        max_queries: int = SEARCH_MAX_QUERIES,
     ) -> WebSearchResult:
-        """执行一次真实搜索：服务器侧搜索，返回结构化结果。"""
-        if not query.strip():
-            raise ValueError("query 必须是非空字符串")
+        """并发执行一到多条查询，再合并为一份结构化结果。
+
+        官方的 provider seam 每次仍只接收一个 query；rc.8 的模型面
+        web_search 工具改为接收必填 queries 数组，并在工具层完成并发与合并。
+        """
+        if max_queries <= 0:
+            raise ValueError("max_queries 必须是正整数")
+        if not queries:
+            raise ValueError("queries 至少需要一条查询")
+        if len(queries) > max_queries:
+            raise ValueError(f"queries 最多只能有 {max_queries} 条查询")
+        if any(not isinstance(query, str) or not query.strip() for query in queries):
+            raise ValueError("queries 中的每一项都必须是非空字符串")
         if max_results <= 0 or max_uses <= 0:
             raise ValueError("max_results 与 max_uses 必须是正整数")
+
+        unique_queries = list(dict.fromkeys(queries))
+        if len(unique_queries) == 1:
+            return self._search_one(unique_queries[0], max_results, max_uses)
+
+        results: list[WebSearchResult | None] = [None] * len(unique_queries)
+        first_error: Exception | None = None
+        with ThreadPoolExecutor(max_workers=len(unique_queries)) as pool:
+            pending: dict[Future[WebSearchResult], int] = {
+                pool.submit(self._search_one, query, max_results, max_uses): index
+                for index, query in enumerate(unique_queries)
+            }
+            for future in as_completed(pending):
+                try:
+                    results[pending[future]] = future.result()
+                except Exception as error:
+                    if first_error is None:
+                        first_error = error
+                    for sibling in pending:
+                        sibling.cancel()
+
+        if first_error is not None:
+            raise first_error
+        return self._merge_results(
+            [cast(WebSearchResult, result) for result in results], max_results
+        )
+
+    def _search_one(
+        self, query: str, max_results: int, max_uses: int
+    ) -> WebSearchResult:
+        """通过 DeepSeek provider 执行一条真实查询。"""
         response = httpx.post(
             f"{self.base_url}/messages",
             headers={
@@ -155,11 +203,39 @@ class WebSearchClient:
             sources=tuple(deduped[:max_results]), truncated=truncated
         )
 
+    @staticmethod
+    def _merge_results(
+        results: list[WebSearchResult], max_results: int
+    ) -> WebSearchResult:
+        """按来源排名轮询合并，并跨查询按 URL 去重。"""
+        merged: list[WebSource] = []
+        seen: set[str] = set()
+        dropped = False
+        source_ranks = max((len(result.sources) for result in results), default=0)
+        for rank in range(source_ranks):
+            for result in results:
+                if rank >= len(result.sources):
+                    continue
+                source = result.sources[rank]
+                if source.url in seen:
+                    continue
+                seen.add(source.url)
+                if len(merged) == max_results:
+                    dropped = True
+                    break
+                merged.append(source)
+            if dropped:
+                break
+        return WebSearchResult(
+            sources=tuple(merged),
+            truncated=dropped or any(result.truncated for result in results),
+        )
+
 
 def web_fetch(url: str, timeout_seconds: float = 20.0) -> str:
     """真实 HTTP GET 一个网页，提取标题与正文片段。
 
-    教学版用最朴素的手段：requests 拿 HTML，正则提 <title>，
+    教学版用最朴素的手段：httpx 获取 HTML，正则提 <title>，
     去标签后截取正文前 800 字符。真实产品会用可读性提取库。"""
     response = httpx.get(url, timeout=timeout_seconds, follow_redirects=True)
     response.raise_for_status()

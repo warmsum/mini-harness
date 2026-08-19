@@ -39,6 +39,7 @@ class RpcRequest:
 class RpcError:
     code: int
     message: str
+    request_id: Any = None
 
 
 def parse_request(text: str) -> RpcRequest | RpcError:
@@ -58,7 +59,11 @@ def parse_request(text: str) -> RpcRequest | RpcError:
     if params is None:
         params = {}
     if not isinstance(params, dict):
-        return RpcError(INVALID_PARAMS, "Invalid params: 必须是 JSON 对象")
+        return RpcError(
+            INVALID_PARAMS,
+            "Invalid params: 必须是 JSON 对象",
+            request_id=data.get("id"),
+        )
     return RpcRequest(
         jsonrpc="2.0",
         id=data.get("id"),
@@ -88,7 +93,7 @@ class RpcDispatcher:
         猜发生了什么（JSON-RPC 的「错误也是响应」约定）。"""
         parsed = parse_request(text)
         if isinstance(parsed, RpcError):
-            return _error_response(None, parsed)
+            return _error_response(parsed.request_id, parsed)
         handler = self._handlers.get(parsed.method)
         if handler is None:
             return _error_response(

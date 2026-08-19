@@ -7,7 +7,7 @@
 1. 边界。Agent 能写哪些文件？一个 bug 或一次恶意诱导，模型的 write 调用会不会把用户家目录删了？
 2. 并发。Agent 读到文件内容后、写回之前，用户自己改了同一个文件，Agent 一写就把用户的新改动覆盖了，怎么办？
 
-官方用三个包回答这两个问题：tool-fs 工具层、fs-sandbox 围栏、fs-observation-policy 观察策略。本章把它们合并成一套教学实现：四个文件工具、一个沙箱围栏、一个读后写观察器。
+官方用三个包回答这两个问题：tool-fs 工具层、fs-sandbox 围栏、fs-observation-policy 观察策略。本章把它们合并成一套教学实现：五个文件工具、一个沙箱围栏、一个读后写观察器。
 
 ## 学习目标
 
@@ -40,7 +40,11 @@
 @dataclass(frozen=True)
 class SandboxPolicy:
     mode: str = READ_ONLY
-    workspace_root: Path = Path.cwd()
+    workspace_root: Path = field(default_factory=Path.cwd)
+
+    def __post_init__(self) -> None:
+        if self.mode not in WIDER_MODES:
+            raise ValueError(f"未知 sandbox mode: {self.mode}")
 
     def writable_roots(self) -> list[Path]:
         return [
@@ -103,7 +107,7 @@ class ObservationTracker:
 - 键用 `resolve()` 规范化。macOS 上 `/var` 是指向 `/private/var` 的符号链接，读时记的键和写时查的键若不统一，会出现明明读过却报没读的假阴性。
 - 两道门都只防无意的覆盖。CAS 的语义是比较后交换：读完作为比较基准，之后写完之前世界没变才放行，变了就要求重新读。成功写入后观察器会记录新版本，因此同一 Agent 后续写入仍有新鲜基准。这是并发编辑的最小防御，不是文件锁。
 
-## 10.4 四个文件工具
+## 10.4 五个文件工具
 
 工具层把围栏和观察器串进每个操作。`read_file` 带行号输出并记录观察：
 
@@ -169,6 +173,11 @@ uv run python chapters/10-filesystem/src/demo.py
 
 (End of file - total 1 lines)
   [FS_STALE_VERSION] …/workspace/data.csv 自上次读取后被外部修改（mtime 变化），请重新 read 后再写
+  重新读取后：
+   1: name,score
+   2: external,edit
+
+(End of file - total 2 lines)
   written 20 chars to …/workspace/data.csv
 
 ━━━ 5. grep 与 glob ━━━
@@ -191,16 +200,16 @@ todo.txt
 
 - `SandboxPolicy.fence_write`：三模式、可写根集合、resolve 规范化、结构化拒绝
 - `ObservationTracker`：读记 mtime、写前 CAS 双门
-- 四个工具：read 带行号与页脚并记录观察，write 全量写入，edit 唯一匹配 str-replace，grep 与 glob 搜索
+- 五个工具：read 带行号与页脚并记录观察，write 全量写入，edit 唯一匹配 str-replace，grep 搜内容，glob 找文件
 - 升级审批：严格更宽表
 
 ## 对照官方
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/fs/fs-sandbox/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/fs/fs-sandbox/README.zh.md) | `SandboxPolicy` | 对齐三种模式、可写根集合、“约束而非安全边界”的定位与结构化 FsError |
-| [`packages/fs/fs-observation-policy/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/fs/fs-observation-policy/README.zh.md) | `ObservationTracker` | 官方读后写 CAS 思想；官方经 fs 事件门禁实现，write-intent 与 observed 两类事件，教学版简化为 mtime 快照 |
-| [`packages/fs/tool-fs/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/fs/tool-fs/README.zh.md) | 四个工具 | 官方工具层还负责把 FsError 渲染成模型可见的 sandbox 标记 |
+| [`packages/fs/fs-sandbox/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/fs/fs-sandbox/README.zh.md) | `SandboxPolicy` | 对齐三种模式、可写根集合、“约束而非安全边界”的定位与结构化 FsError |
+| [`packages/fs/fs-observation-policy/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/fs/fs-observation-policy/README.zh.md) | `ObservationTracker` | 官方读后写 CAS 思想；官方经 fs 事件门禁实现，write-intent 与 observed 两类事件，教学版简化为 mtime 快照 |
+| [`packages/fs/tool-fs/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/fs/tool-fs/README.zh.md) | 五个工具函数 | 官方工具层还负责把 FsError 渲染成模型可见的 sandbox 标记 |
 
 ## 练习
 

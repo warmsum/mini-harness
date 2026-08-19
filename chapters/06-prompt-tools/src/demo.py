@@ -4,7 +4,7 @@
     uv run python chapters/06-prompt-tools/src/demo.py
 
 输出三节：
-① 组装出的系统提示词（三段拼接 + 变量替换）
+① 组装出的系统提示词（两段拼接 + 变量替换）
 ② 注册表投影出的工具说明书（不含 execute）
 ③ 真实跑一遍：模型用 calculator 回答问题
 """

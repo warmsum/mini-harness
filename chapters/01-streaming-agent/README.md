@@ -132,6 +132,8 @@ chapters/01-streaming-agent/src/
 import os
 from pathlib import Path
 
+from dotenv import dotenv_values
+
 
 def load_api_key() -> str:
     # 第一步：环境变量（部署到服务器时的标准做法）
@@ -141,13 +143,9 @@ def load_api_key() -> str:
 
     # 第二步：项目根目录的 .env 文件
     env_path = Path(__file__).resolve().parents[3] / ".env"
-    if env_path.exists():
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line.startswith("DEEPSEEK_API_KEY="):
-                value = line.split("=", 1)[1].strip().strip('"').strip("'")
-                if value:
-                    return value
+    from_file = dotenv_values(env_path).get("DEEPSEEK_API_KEY")
+    if from_file:
+        return from_file
 
     raise RuntimeError("找不到 DEEPSEEK_API_KEY：请参考 .env.example 创建 .env")
 ```
@@ -156,8 +154,8 @@ def load_api_key() -> str:
 
 - `os.getenv("DEEPSEEK_API_KEY")` 读环境变量，没有就返回 `None`。
 - `Path(__file__).resolve().parents[3]` 是定位 `.env` 的关键。`__file__` 是这段代码自己的文件路径，文件位于 `chapters/01-streaming-agent/src/`，`parents[0]` 是 `src/`，`parents[1]` 是 `01-streaming-agent/`，`parents[2]` 是 `chapters/`，`parents[3]` 才是项目根目录。`resolve()` 把相对路径变成绝对路径，无论从哪个目录启动程序都能找到 `.env`。
-- 逐行扫描 `.env`，找到 `DEEPSEEK_API_KEY=` 开头的行，用 `split("=", 1)` 取等号后面的值。参数 `1` 表示只在第一个等号处分割，因此 Key 中后续的等号会被保留。
-- `strip().strip('"').strip("'")` 去掉首尾空格和可能的引号。
+- `dotenv_values(env_path)` 使用 `python-dotenv` 解析 `.env`，引号、注释等常见语法交给成熟库处理；它返回配置字典，不会把文件里的其他值写入当前进程环境。
+- `.get("DEEPSEEK_API_KEY")` 只取本项目需要的密钥，因此即使 `.env` 里误放了其他配置，也不会由这里注入程序。
 - 最后 `raise RuntimeError(...)`：Key 缺失时立刻失败并说清原因。坏状态要在最靠近它的地方响亮地失败，而不是带着一个空 Key 继续跑，直到发请求时才报一个莫名其妙的 401。
 
 ## 1.2 先定义一条消息
@@ -337,9 +335,9 @@ async for piece in client.stream(HISTORY):
 流式输出缩短了等待第一段内容的时间，但也带来了历史记录问题。先比较两种直接处理分片的方式：
 
 - 每收到一个 chunk 就往历史里塞一条消息。下一轮请求将带着几十条碎消息发给模型，token 浪费还在其次，模型看到的历史会异常混乱。
-- 流在中途断掉，比如网络抖动或用户取消。如果历史里已经塞了半句话，这条半个回答会永远留在历史里，后续每一轮都带着它。
+- 流在中途断掉。如果历史里已经塞了半句话，程序必须知道它是正常完成、提供方失败，还是用户主动取消；否则后续请求会把来源不明的半个回答当成完整历史。
 
-官方 Harness 对这个问题给出的答案是 BlockAssembler，块组装器。流式分片一边实时展示，一边被组装器暂存；流正常结束后，组装器产出一条完整消息，这条消息才被写进历史。官方把这个边界守得比我们更严，连每个块的结束都有专门的 `block-end` 事件标记。我们先实现简化版：
+官方 Harness 对这个问题给出的答案是 BlockAssembler，块组装器。流式分片一边实时展示，一边被组装器暂存；流正常结束后，组装器产出一条完整消息。rc.8 又把“失败”和“取消”分开处理：提供方或传输失败仍不提交 assistant 消息；用户主动取消时，如果已经显示了非空文本或思考内容，就保存这段可见前缀并标记 `interrupted: true`，未执行的工具调用不会混入历史。教学版还没有取消入口，因此采用更保守的规则：只要缺少 `[DONE]` 就拒绝生成消息。
 
 ```python
 class DeepSeekClient:
@@ -369,7 +367,8 @@ class DeepSeekClient:
 
 ## 运行完整示例
 
-本章代码共两个文件，全部自包含，只依赖标准库与 httpx 系列。在项目根目录运行：
+本章代码共两个文件，全部自包含，使用 `httpx`、`httpx-sse` 与
+`python-dotenv`。在项目根目录运行：
 
 ```bash
 uv run python chapters/01-streaming-agent/src/demo.py
@@ -391,10 +390,10 @@ uv run python chapters/01-streaming-agent/src/demo.py
 
 | 官方代码 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/llm/llm-deepseek/src/adapter.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/llm/llm-deepseek/src/adapter.ts) | `DeepSeekClient.stream()` | DeepSeek 适配器解析 SSE，并把 provider 的正常结束、错误与中止转换成明确的 finish 语义 |
-| [`packages/llm/llm/src/assembler.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/llm/llm/src/assembler.ts) | `stream_message()` | `BlockAssembler` 只在收到合法结束后产出最终消息；回放元数据也绑定到最终保留内容 |
+| [`packages/llm/llm-deepseek/src/adapter.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/llm-deepseek/src/adapter.ts) | `DeepSeekClient.stream()` | DeepSeek 适配器解析 SSE，并把 provider 的正常结束、错误与中止转换成明确的 finish 语义 |
+| [`packages/llm/llm/src/assembler.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/llm/src/assembler.ts) | `stream_message()` | `BlockAssembler` 正常结束时组装完整块；显式取消时只保留非空文本/思考前缀，工具调用不进入中断消息 |
 
-两处差异：官方的组装器同时处理文本、思考、工具调用三种分片，并且要求每个块以 `block-end` 事件正式收尾，流中途断了会留下明确的失败记录，而不是静默接受半条消息。工具调用分片留到第 02 章展开，错误处理的分寸会在第 07 章系统化处理。
+教学版只处理文本。官方组装器还处理思考与工具调用分片，DeepSeek adapter 也能为声明支持图片的模型解析持久化附件、限制请求图片总量；这些多模态能力不在本章范围内。工具调用分片留到第 02 章展开，取消与错误的完整生命周期留到持续运行的 Agent 中处理。
 
 ## 练习
 

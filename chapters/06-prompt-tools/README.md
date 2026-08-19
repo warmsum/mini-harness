@@ -126,17 +126,25 @@ def run_agent(client, registry, assembler, user_prompt,
     tools_by_name = {tool.name: tool for tool in tools}
     session = Session()
     # ...turn/start、user/message 与第 05 章相同
+    request_header = None
 
     for step in range(1, max_steps + 1):
+        system_prompt = assembler.render(variables)
+        # system、模型配置或工具 schema 变化时追加 request/header
+        # ...计算 header_fingerprint 并与 request_header 比较
         messages = [
-            Message(role="system", content=assembler.render(variables)),
+            Message(role="system", content=system_prompt),
             *session.derive_messages(),
         ]
         reply = client.chat(messages, tools)
         # ...其余与第 05 章相同
 ```
 
-至此，请求 envelope 中的 system 由组装器生成，tools 由注册表提供。循环不再需要知道提示词由几段组成，也不关心工具由哪个模块注册。第 03 章提出的职责拆分在这里落到请求组装流程中。
+至此，请求 envelope 中的 system 由组装器生成，tools 由注册表提供。每个
+step 都重新渲染 prompt，因此变量 provider 的运行时变化能在下一次模型调用
+生效；只有 envelope 真正变化时才追加新的 `request/header`。循环不再需要
+知道提示词由几段组成，也不关心工具由哪个模块注册。第 03 章提出的职责拆分
+在这里落到请求组装流程中。
 
 ## 6.5 运行完整示例
 
@@ -190,10 +198,10 @@ uv run python chapters/06-prompt-tools/src/demo.py
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/core/system-prompt/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/core/system-prompt/README.zh.md) | `PromptAssembler` | 对齐有序 section、同层重名拒绝与每次 render 求值的具名 variable |
+| [`packages/core/system-prompt/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/core/system-prompt/README.zh.md) | `PromptAssembler` | 对齐有序 section、同层重名拒绝与每次 render 求值的具名 variable |
 | 同上 | scope 与重名 | 跨 scope 最近层可以遮蔽远层；同一层重复 section 名称会报错 |
 | 同上 | 排序确定性 | section 同 order 保持注册顺序；工具默认按名称排序，显式 `toolOrder` 才覆盖 |
-| [`packages/core/tools/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/core/tools/README.zh.md) | `ToolRegistry` | 对齐注册表与模型面 schema；执行器只留在本地，不进入请求 envelope |
+| [`packages/core/tools/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/core/tools/README.zh.md) | `ToolRegistry` | 对齐注册表与模型面 schema；执行器只留在本地，不进入请求 envelope |
 
 官方比教学版多一块：工具 schema 属于组装结果本身。core/tools 文档写明注册表通过 `ctx.systemPrompt.tools()` 自动把工具 schema 送入系统提示词组装，模型获知自己能做什么是一个连贯整体，适配器再把 schema 作为独立 wire 字段传输。教学版把两者分开渲染，协议原生的 tools 字段直接交给 client，结构更直观，差异在练习 3 展开。
 

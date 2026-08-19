@@ -207,9 +207,9 @@ demo 用一个缩小的上下文窗口（4000 token，教学用）让压力容�
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/llm/token-meter/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/llm/token-meter/README.zh.md) | `TokenMeter` | 教学版保留 4 字符/token 启发式；官方还能复用提供方真实用量并跟踪 projectedTokens |
+| [`packages/llm/token-meter/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/token-meter/README.zh.md) | `TokenMeter` | 教学版保留 4 字符/token 启发式；官方还能复用提供方真实用量并跟踪 projectedTokens |
 | 同上 | 解耦 | 官方 meter 与模型路由、压缩策略无关，压力判定留给消费方 |
-| [`packages/compaction/compaction-basic/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/compaction/compaction-basic/README.zh.md) | `compact` | 对齐 0.8/0.16 阈值、KV cache 重放、缩小校验、重试与失败保留原文 |
+| [`packages/compaction/compaction-basic/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/compaction/compaction-basic/README.zh.md) | `compact` | 对齐 0.8/0.16 阈值、KV cache 重放、缩小校验、重试与失败保留原文 |
 | 同上 | （练习 3） | 官方先用 toolResultPruner 改写超大工具结果；压力恢复安全时跳过摘要，省一次模型调用 |
 
 ## 练习

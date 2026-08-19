@@ -1,8 +1,11 @@
-"""第 02 章：支持工具调用的客户端与消息模型。
+"""支持工具调用的 DeepSeek 客户端与消息模型。
 
-在第 01 章的 DeepSeekClient 基础上扩展三样东西：
+这部分在第 02 章首次实现。后续章节保留一份副本，让每章都能从自己的
+`src/` 目录独立运行，不需要跨目录导入前面章节的代码。
+
+它提供三样基础能力：
 1. `ToolCall` —— 模型发起的一次工具调用请求
-2. `Message` 扩展 —— assistant 消息可携带 tool_calls；工具结果以 role="tool" 回灌
+2. `Message` —— assistant 可携带 reasoning_content 与 tool_calls；工具结果以 role="tool" 回灌
 3. `DeepSeekClient.chat()` 支持传入工具清单、解析模型返回的 tool_calls
 """
 
@@ -12,10 +15,10 @@ import json
 import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Callable
 
 import httpx
+from dotenv import dotenv_values, find_dotenv
 from httpx_sse import aconnect_sse
 
 # ---------------------------------------------------------------------------
@@ -26,21 +29,16 @@ from httpx_sse import aconnect_sse
 def load_api_key() -> str:
     """按「环境变量优先，其次 .env 文件」的顺序找 DeepSeek API Key。
 
-    与章节版的一个差异：包被组装后，文件嵌套层级不再固定，
-    所以这里向上逐级查找第一个含 DEEPSEEK_API_KEY 的 .env。"""
+    与章节版的一个差异：安装后的包可能位于 site-packages，不能从
+    __file__ 推断用户项目。这里从当前工作目录向上查找 .env。"""
     from_env = os.getenv("DEEPSEEK_API_KEY")
     if from_env:
         return from_env
-    for parent in Path(__file__).resolve().parents:
-        env_path = parent / ".env"
-        if not env_path.exists():
-            continue
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line.startswith("DEEPSEEK_API_KEY="):
-                value = line.split("=", 1)[1].strip().strip('"').strip("'")
-                if value:
-                    return value
+    env_path = find_dotenv(usecwd=True)
+    if env_path:
+        from_file = dotenv_values(env_path).get("DEEPSEEK_API_KEY")
+        if from_file:
+            return from_file
     raise RuntimeError("找不到 DEEPSEEK_API_KEY：请参考 .env.example 创建 .env")
 
 
@@ -64,14 +62,16 @@ class ToolCall:
 
 @dataclass(frozen=True)
 class Message:
-    """一条对话消息。相对第 01 章多了两个可选字段：
+    """一条对话消息。相对第 01 章多了三个可选字段：
 
+    - reasoning_content：模型的思考内容，后续请求必须按原文回传；
     - tool_calls：assistant 消息可以携带一组工具调用请求；
     - tool_call_id：role="tool" 的消息用它标明「这是对哪次调用的回答」。
     """
 
     role: str
     content: str | None = None
+    reasoning_content: str | None = None
     tool_calls: tuple[ToolCall, ...] = ()
     tool_call_id: str | None = None
 
@@ -105,11 +105,15 @@ class DeepSeekClient:
 
     @staticmethod
     def _wire_message(m: Message) -> dict[str, Any]:
-        """把内部 Message 转成协议要求的 dict。只有 role="tool" 的消息结构特殊：
-        它必须带 tool_call_id，让服务器知道这条结果是回答哪次调用的。"""
+        """把内部 Message 转成协议要求的 dict。assistant 的思考原文会完整回传；
+        role="tool" 还必须带 tool_call_id，让服务器知道结果对应哪次调用。"""
         wire: dict[str, Any] = {"role": m.role}
         if m.content is not None:
             wire["content"] = m.content
+        elif m.role == "assistant":
+            wire["content"] = ""
+        if m.reasoning_content:
+            wire["reasoning_content"] = m.reasoning_content
         if m.tool_calls:
             wire["tool_calls"] = [
                 {
@@ -124,7 +128,7 @@ class DeepSeekClient:
         return wire
 
     def chat(self, messages: list[Message], tools: list[Tool] | None = None) -> Message:
-        """非流式调用。本章的 Agent 循环用它：一次拿回完整回复（含 tool_calls），
+        """非流式调用。本章的 Agent 循环用它：一次拿回完整回复（含 reasoning_content 与 tool_calls），
         逻辑最清晰。流式工具分片的组装留到练习与官方对照。"""
         payload: dict[str, Any] = {
             "model": self.MODEL,
@@ -168,6 +172,7 @@ class DeepSeekClient:
         return Message(
             role="assistant",
             content=raw_message.get("content"),
+            reasoning_content=raw_message.get("reasoning_content"),
             tool_calls=tuple(tool_calls),
         )
 

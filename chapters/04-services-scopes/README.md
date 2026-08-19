@@ -252,7 +252,7 @@ result = ctx.waterfall("tools/execute", {"name": "calculator"}, core_executor)
 
 官方 cordis 还有一个本章标题里的概念，作用域 isolate。它的用途是同一个服务名，不同插件看到不同实例，比如每个 agent 各有自己的工具注册表、自己的文件系统后端。官方用 `ctx.isolate(name)` 给服务名分配作用域标签，查找时按标签隔离。
 
-教学版不实现 isolate。需要隔离时，直接创建一个新的 `Context`，让每个子 agent 使用独立环境，第 14 章会采用这种方式。这个方案减少了实例间的内存共享，但概念和实现更简单。官方实现见 `vendor/cordis/src/context.ts` 的 isolate 方法。
+教学版不实现 isolate。在确实需要隔离服务时，可以为每个运行单元创建独立 `Context`；这种做法比同一棵 Context 树内的按服务隔离更粗，但更容易讲清。第 14 章采用的是相同的“隔离状态”思想，不过它直接给每个子 agent 新建 `Session`，并没有复用本章的 `Context`。官方 isolate 实现见 `vendor/cordis/src/context.ts`。
 
 ## 4.7 运行完整示例
 
@@ -282,7 +282,7 @@ uv run python chapters/04-services-scopes/src/demo.py
   报错: 读取服务 "llm" 前必须在 inject 里声明
   ← 依赖显式化不是约定，是语法
 
-=== 时刻 4：waterfall ===
+=== 时刻 4：waterfall 瀑布 ===
   [timeout-policy] 开始执行工具 calculator
   [core] 真正执行 calculator……
   [timeout-policy] 工具 calculator 完成
@@ -298,16 +298,16 @@ uv run python chapters/04-services-scopes/src/demo.py
 - fiber-bound Context view：回调在安装结束后仍按自己的 inject 读取服务
 - `__getattr__`：读服务必须先声明的语法级约束
 - `waterfall`：可拦截、可改写、返回值沿链回传
-- 作用域 isolate：教学版使用独立 Context 简化，第 14 章会实际使用
+- 作用域 isolate：本章只说明独立 Context 这一粗粒度替代方案，没有实现官方的同树隔离
 
 ## 对照官方
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`vendor/cordis/src/reflect.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/vendor/cordis/src/reflect.ts) | `provide` 与 `_notify` | 官方按名字和作用域通知受影响 fiber；教学版保持重名拒绝与所有权，但用全量重算简化 |
-| [`vendor/cordis/src/fiber.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/vendor/cordis/src/fiber.ts) | `_recheck` | 官方依赖解析与 epoch 比较在 fiber.ts 内部，签名机制一致 |
-| [`vendor/cordis/src/context.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/vendor/cordis/src/context.ts) | Context view / `__getattr__` | 官方 Proxy 把访问绑定到 fiber 与反射层；Python 版用 owner view 保留同样的调用身份 |
-| [`vendor/cordis/src/events.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/vendor/cordis/src/events.ts) | `waterfall` | 官方与教学版都让监听器按注册顺序包裹内层执行器 |
+| [`vendor/cordis/src/reflect.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/vendor/cordis/src/reflect.ts) | `provide` 与 `_notify` | 官方按名字和作用域通知受影响 fiber；教学版保持重名拒绝与所有权，但用全量重算简化 |
+| [`vendor/cordis/src/fiber.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/vendor/cordis/src/fiber.ts) | `_recheck` | 官方依赖解析与 epoch 比较在 fiber.ts 内部，签名机制一致 |
+| [`vendor/cordis/src/context.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/vendor/cordis/src/context.ts) | Context view / `__getattr__` | 官方 Proxy 把访问绑定到 fiber 与反射层；Python 版用 owner view 保留同样的调用身份 |
+| [`vendor/cordis/src/events.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/vendor/cordis/src/events.ts) | `waterfall` | 官方与教学版都让监听器按注册顺序包裹内层执行器 |
 
 ## 练习
 

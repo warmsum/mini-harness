@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import cast
 
 import httpx
+from dotenv import dotenv_values
 from httpx_sse import aconnect_sse
 
 # ---------------------------------------------------------------------------
@@ -37,14 +38,9 @@ def load_api_key() -> str:
     # 第二步：项目根目录的 .env 文件。
     # 本文件位于 chapters/01-streaming-agent/src/，向上三级才是项目根目录。
     env_path = Path(__file__).resolve().parents[3] / ".env"
-    if env_path.exists():
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line.startswith("DEEPSEEK_API_KEY="):
-                # 去掉 "DEEPSEEK_API_KEY=" 前缀，再剥掉可能的引号
-                value = line.split("=", 1)[1].strip().strip('"').strip("'")
-                if value:
-                    return value
+    from_file = dotenv_values(env_path).get("DEEPSEEK_API_KEY")
+    if from_file:
+        return from_file
 
     raise RuntimeError(
         "找不到 DEEPSEEK_API_KEY：请在项目根目录创建 .env，"
@@ -76,7 +72,7 @@ class Message:
 
 
 class DeepSeekClient:
-    """DeepSeek 的 OpenAI 兼容客户端，只用标准库 + httpx，零魔法。"""
+    """基于 httpx 与 httpx-sse 的 DeepSeek OpenAI 兼容客户端。"""
 
     BASE_URL = "https://api.deepseek.com"
     MODEL = "deepseek-chat"

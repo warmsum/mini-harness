@@ -1,4 +1,4 @@
-"""第 07 章：Inbox —— 两条待处理队列与领取原语。
+"""Inbox：两条待处理队列与领取原语（第 07 章首次实现）。
 
 对应官方 core/agent-loop 的 inbox 设计：
 - followup：追加到「下一轮」队列，并唤醒 Agent；

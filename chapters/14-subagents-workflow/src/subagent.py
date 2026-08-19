@@ -1,7 +1,7 @@
 """第 14 章：Subagent —— 把工作委派给子 agent。
 
 对应官方 packages/subagent/subagent + tool-subagent。
-教学版的核心决策（第 04 章 4.6 节约定的兑现）：
+教学版沿用第 04 章讨论的“状态隔离”目标，但不使用那一章的 Context：
 子 agent = 一个独立的运行环境：自己的会话、自己的工具子集，
 只看到父 agent 交给它的 task 描述——父对话历史一个字都不带。
 
@@ -24,11 +24,13 @@ from session import Session
 class SubagentResult:
     """子 agent 的一次运行结果。
 
-    对应官方 SubagentRun.result → { output, stopReason }：
-    只有正常完成才返回 output；失败路径保留已生成的部分文本。"""
+    对应官方 SubagentRun.result → { output, stopReason, diagnostic? }：
+    output 只放子 agent 的回答，失败诊断单独存放，避免把运行时错误
+    冒充成子 agent 说过的话。失败路径仍保留已生成的部分文本。"""
 
     output: str
     stop_reason: str  # "completed" / "max-steps" / "error"
+    diagnostic: str | None = None
 
 
 def run_subagent(
@@ -57,12 +59,21 @@ def run_subagent(
             )
             session.append(
                 "assistant/message",
-                {"content": reply.content, "tool_calls": []},
+                {
+                    "content": reply.content,
+                    **(
+                        {"reasoning_content": reply.reasoning_content}
+                        if reply.reasoning_content
+                        else {}
+                    ),
+                    "tool_calls": [],
+                },
             )
             partial = reply.content or ""
             if reply.content:
                 session.append("turn/end", {"turn": 1, "reason": "completed"})
                 return SubagentResult(output=reply.content, stop_reason="completed")
+        session.append("turn/end", {"turn": 1, "reason": "max-steps"})
         return SubagentResult(
             output=partial,
             stop_reason="max-steps",
@@ -70,7 +81,14 @@ def run_subagent(
     except Exception as error:
         # 失败保留部分文本：被截断的回答不会被报告为成功，
         # 也不会被悄悄丢弃。
-        return SubagentResult(output=partial, stop_reason=f"error: {error}")
+        session.append(
+            "turn/end", {"turn": 1, "reason": "error", "message": str(error)}
+        )
+        return SubagentResult(
+            output=partial,
+            stop_reason="error",
+            diagnostic=str(error),
+        )
 
 
 def run_subagents_parallel(
@@ -105,7 +123,12 @@ def create_subagent_tool(
         if not isinstance(task, str) or not task.strip():
             raise ValueError("参数 task 必须是非空字符串")
         result = run_subagent(client, task, child_system_prompt)
-        return f"[{result.stop_reason}]\n{result.output}"
+        parts = [f"[{result.stop_reason}]"]
+        if result.diagnostic is not None:
+            parts.append(f"Diagnostic: {result.diagnostic}")
+        if result.output:
+            parts.append(result.output)
+        return "\n".join(parts)
 
     return Tool(
         name="subagent",

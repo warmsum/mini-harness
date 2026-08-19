@@ -51,7 +51,9 @@ class SkillCatalog:
             skill_file = skill_dir / "SKILL.md"
             if not skill_file.is_file():
                 continue
-            frontmatter = _parse_frontmatter(skill_file.read_text(encoding="utf-8"))
+            if not SKILL_NAME.fullmatch(skill_dir.name):
+                raise ValueError(f"无效的技能目录名: {skill_dir.name!r}")
+            frontmatter = _read_frontmatter(skill_file)
             if frontmatter["name"] != skill_dir.name:
                 raise ValueError(
                     f"{skill_file} 的 name 必须与目录名 {skill_dir.name!r} 一致"
@@ -106,18 +108,36 @@ class SkillCatalog:
         return "\n".join(lines)
 
 
+def _read_frontmatter(path: Path) -> dict[str, str]:
+    """只读取文件开头的 frontmatter，不把技能正文加载进目录扫描。"""
+    with path.open(encoding="utf-8") as file:
+        first = file.readline()
+        if first.strip() != "---":
+            raise ValueError("SKILL.md 必须以 --- frontmatter 开头")
+        lines = [first]
+        for line in file:
+            lines.append(line)
+            if line.strip() == "---":
+                return _parse_frontmatter("".join(lines))
+    raise ValueError("SKILL.md 的 frontmatter 缺少结束 ---")
+
+
 def _parse_frontmatter(text: str) -> dict[str, str]:
     """解析 SKILL.md 开头的 --- 块（name/description 两行，教学版手写解析）。"""
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         raise ValueError("SKILL.md 必须以 --- frontmatter 开头")
     fields: dict[str, str] = {}
+    closed = False
     for line in lines[1:]:
         if line.strip() == "---":
+            closed = True
             break
         if ":" in line:
             key, _, value = line.partition(":")
             fields[key.strip()] = value.strip()
+    if not closed:
+        raise ValueError("SKILL.md 的 frontmatter 缺少结束 ---")
     if "name" not in fields or "description" not in fields:
         raise ValueError("frontmatter 必须包含 name 与 description")
     return fields
@@ -126,9 +146,13 @@ def _parse_frontmatter(text: str) -> dict[str, str]:
 def _strip_frontmatter(text: str) -> str:
     """去掉 frontmatter，只返回正文。"""
     lines = text.splitlines()
-    end = 1
+    if not lines or lines[0].strip() != "---":
+        raise ValueError("SKILL.md 必须以 --- frontmatter 开头")
+    end: int | None = None
     for index, line in enumerate(lines[1:], start=1):
         if line.strip() == "---":
             end = index + 1
             break
+    if end is None:
+        raise ValueError("SKILL.md 的 frontmatter 缺少结束 ---")
     return "\n".join(lines[end:]).strip()

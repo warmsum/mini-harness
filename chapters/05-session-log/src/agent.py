@@ -1,6 +1,6 @@
 """第 05 章：日志化的 Agent 循环。
 
-与第 02 章的唯一区别：对话历史从「普通 list」升级为「事件日志」。
+相对第 02 章的核心变化：对话历史从「普通 list」升级为「事件日志」。
 循环不再直接改 messages 列表，而是往 Session 追加事件；
 每次请求前用 derive_messages() 投影出模型看到的历史。
 """
@@ -60,6 +60,11 @@ def run_agent(
                     "assistant/message",
                     {
                         "content": reply.content,
+                        **(
+                            {"reasoning_content": reply.reasoning_content}
+                            if reply.reasoning_content
+                            else {}
+                        ),
                         "tool_calls": [
                             {"id": c.id, "name": c.name, "arguments": c.arguments}
                             for c in reply.tool_calls

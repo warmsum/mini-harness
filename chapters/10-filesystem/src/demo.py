@@ -52,7 +52,12 @@ def main() -> None:
             edit_file(ws / "todo.txt", "学习", "复习", policy, tracker)
         except ValueError as e:
             print(f"  {e}")
-        print(edit_file(ws / "todo.txt", "学习", "复习", policy, tracker, replace_all=True))
+        print(
+            "  "
+            + edit_file(
+                ws / "todo.txt", "学习", "复习", policy, tracker, replace_all=True
+            )
+        )
 
         section("4. 外部修改：读后写不是盲写（mtime CAS）")
         data = ws / "data.csv"
@@ -65,8 +70,9 @@ def main() -> None:
             write_file(data, "name,score\nmini,200\n", policy, tracker)
         except PermissionError as e:
             print(f"  {e}")
-        tracker.record_read(data)  # 重新读，观察刷新
-        print(write_file(data, "name,score\nmini,200\n", policy, tracker))
+        print("  重新读取后：")
+        print(read_file(data, tracker))
+        print("  " + write_file(data, "name,score\nmini,200\n", policy, tracker))
 
         section("5. grep 与 glob")
         print(f"  grep 'sandbox':\n{grep(ws, 'sandbox')}")

@@ -1,4 +1,4 @@
-"""第 07 章：Agent —— 持续对话的完整循环。
+"""持续对话的 Agent 循环（第 07 章首次实现）。
 
 第 06 章的 run_agent 是「一次性」的：一个问题进，一个结果出。
 本章的 Agent 是「常驻」的：随时接收 followup/steer，逐轮处理，
@@ -127,6 +127,11 @@ class Agent:
                     "assistant/message",
                     {
                         "content": reply.content,
+                        **(
+                            {"reasoning_content": reply.reasoning_content}
+                            if reply.reasoning_content
+                            else {}
+                        ),
                         "tool_calls": [
                             {"id": c.id, "name": c.name, "arguments": c.arguments}
                             for c in reply.tool_calls

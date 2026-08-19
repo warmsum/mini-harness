@@ -1,10 +1,10 @@
-"""第 08 章：JSONL 持久化 —— 把会话日志写进磁盘。
+"""JSONL 持久化：把会话日志写进磁盘（第 08 章首次实现）。
 
 对应官方 packages/session/session-persistence-jsonl。
 教学版实现三个核心机制：
 1. JSONL 格式：首行 header + 每行一条事件；
 2. 原子发布：先写临时文件再 rename——崩溃时不会留下半截文件；
-3. 崩溃修复：加载时截断残缺尾行，合成 turn/end 收尾。
+3. 崩溃修复：加载时截断残缺尾行，并为开放的工具、step、turn 合成收尾。
 """
 
 from __future__ import annotations
@@ -78,7 +78,9 @@ class JsonlStore:
         if torn_offset is not None:
             with self.path.open("r+b") as file:
                 file.truncate(torn_offset)
-            _append_recovery_closers(events)
+        # 崩溃可能恰好发生在完整行写完之后，因此即使没有 torn tail，
+        # 也要根据已持久化事件检查开放状态。
+        _append_recovery_closers(events)
         return Session.from_log(events)
 
     def _read_records(self) -> tuple[list[SessionEvent], int | None]:

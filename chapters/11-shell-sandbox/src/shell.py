@@ -4,7 +4,7 @@
 教学版实现三件事：
 1. run_command —— subprocess 执行 + 超时 + 输出捕获；
 2. ApprovalPolicy —— 审批策略：ask（询问）/ never（直接拒绝）；
-3. approve_once —— 一次性授权：allowed-once 只放行所请求的那一个动作。
+3. grant_once —— 一次性授权：allowed-once 只放行所请求的那一个动作。
 
 诚实边界：官方 bash-sandbox 用内核级隔离（seatbelt/landlock）把
 「文件写效应」挡在系统调用层，并明确限制只覆盖文件影响；
@@ -29,6 +29,7 @@ APPROVAL_UNAVAILABLE = "unavailable"
 # 审批策略：ask = 走审批通道；never = 直接拒绝（官方 ApprovalPolicy）
 POLICY_ASK = "ask"
 POLICY_NEVER = "never"
+SHELL_MODES = frozenset({"read-only", "workspace-write", "danger-full-access"})
 
 # 只读命令白名单：read-only 模式下仅这些前缀的命令放行。
 # （教学简化——真实内核沙箱按系统调用拦截，不看命令文本。）
@@ -88,9 +89,9 @@ class ShellPolicy:
     """命令执行的决策层：模式门 + 审批。
 
     决策顺序（对应官方 sandbox 决策的简化版）：
-    1. 模式门：read-only 只放行白名单只读命令；更宽模式放行一切；
-    2. 审批：policy=never 直接拒绝；policy=ask 调用审批回调；
-    3. allowed-once：一次性授权，用一次即失效。
+    1. allowed-once：一次性授权，用一次即失效；
+    2. 模式门：read-only 只放行白名单只读命令；更宽模式进入审批；
+    3. 审批：policy=never 直接拒绝；policy=ask 调用审批回调。
     """
 
     def __init__(
@@ -99,6 +100,10 @@ class ShellPolicy:
         approval_policy: str = POLICY_ASK,
         approver: Callable[[str], str] | None = None,
     ) -> None:
+        if mode not in SHELL_MODES:
+            raise ValueError(f"未知 shell mode: {mode}")
+        if approval_policy not in {POLICY_ASK, POLICY_NEVER}:
+            raise ValueError(f"未知 approval policy: {approval_policy}")
         self.mode = mode
         self.approval_policy = approval_policy
         # 审批回调：返回 APPROVAL_ALLOWED_ONCE / APPROVAL_REJECTED / ...

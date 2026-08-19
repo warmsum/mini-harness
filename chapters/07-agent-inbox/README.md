@@ -134,7 +134,7 @@ class Agent:
 uv run python chapters/07-agent-inbox/src/demo.py
 ```
 
-真实输出，模型回复内容每次不同，事件结构稳定：
+下面是两轮都调用一次 calculator 时的代表性输出。模型可能直接回答或增加工具调用，因此 assistant 文本、step 数和事件总数不是固定值；turn/step 的嵌套规则保持不变：
 
 ```
 === 第 1 轮：问 1+2*3 ===
@@ -150,39 +150,48 @@ uv run python chapters/07-agent-inbox/src/demo.py
 
 === 事件日志：两个轮次边界 ===
   #0  turn/start            ← 轮次边界
-  #1  user/message
-  #2  assistant/message
-  #3  tool/call
-  #4  tool/result
-  #5  assistant/message
-  #6  turn/end              ← 轮次边界
-  #7  turn/start            ← 轮次边界
-  #8  user/message
+  #1  step/start
+  #2  user/message
+  #3  request/header
+  #4  assistant/message
+  #5  tool/call
+  #6  tool/result
+  #7  step/end
+  #8  step/start
   #9  assistant/message
-  #10 tool/call
-  #11 tool/result
-  #12 assistant/message
-  #13 turn/end              ← 轮次边界
+  #10 step/end
+  #11 turn/end              ← 轮次边界
+  #12 turn/start            ← 轮次边界
+  #13 step/start
+  #14 user/message
+  #15 assistant/message
+  #16 tool/call
+  #17 tool/result
+  #18 step/end
+  #19 step/start
+  #20 assistant/message
+  #21 step/end
+  #22 turn/end              ← 轮次边界
 ```
 
 三个观察点：
 
 1. 历史延续。第 2 轮打印出的消息里有两条 assistant，第一条是第 1 轮的答案。派生视图自动包含全部历史，模型在第 2 轮确实记得上一轮发生了什么。
-2. 边界清晰。14 条事件被分成两个由 turn/start 与 turn/end 夹住的完整块，这是轮次边界在日志里的样子，第 08 章与第 09 章会反复用到它。
-3. 每轮两个 step。一次模型调用加工具执行就是一个 step，观察 assistant/message 与 tool/call 的交替，一轮里交替几次就是几个 step。
+2. 边界清晰。这个示例的 23 条事件被分成两个由 turn/start 与 turn/end 夹住的完整块；若模型行为改变，总数会变化，边界仍保持闭合。
+3. 这次每轮有两个 step：第一次请求工具，第二次生成最终文本。一次模型调用及其工具执行就是一个 step，不能只靠 assistant/message 数量猜测，应该读取显式的 step/start 与 step/end。
 
 ## 本章小结
 
 - `Inbox`：next-turn 与 next-step 两条队列，两个领取时机
 - `Agent`：常驻循环，领取、开轮、轮内 step 循环、关轮
-- `steer` 机制：step 级插队，带标记记录进日志
+- `steer` 机制：step 级插队；领取后按普通 `user/message` 入日志，教学版不额外保留投递类型
 - turn（轮次）与 step（步骤）术语体系，以及轮次边界在日志中的形态
 
 ## 对照官方
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/core/agent-loop/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/core/agent-loop/README.zh.md) | 术语 | 官方同样用 turn 表示一次唤醒到结束，用 step 表示一次模型调用与工具执行 |
+| [`packages/core/agent-loop/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/core/agent-loop/README.zh.md) | 术语 | 官方同样用 turn 表示一次唤醒到结束，用 step 表示一次模型调用与工具执行 |
 | 同上 | `Inbox` | 官方 `send()` 按 target × wakeup 路由；followup、steer、inject 分别表达下一轮、下一步唤醒和下一步静默注入 |
 | 同上 | `Agent` | 官方把 ReactLoopAgent 与 inbox 保持为包内实现，对外暴露 send 原语；教学版直接暴露类便于学习 |
 | 同上 | `_run_turn` | 核心循环只负责调用模型、运行工具和重复，其余行为由插件与事件组合 |

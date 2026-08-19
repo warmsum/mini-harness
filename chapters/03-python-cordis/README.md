@@ -198,7 +198,11 @@ ctx.effect(lambda: stop_task)
 
 这里有两个点要解释清楚：
 
-为什么多套一层 `lambda`？Python 在调用函数前会先求值所有参数。如果直接写 `ctx.effect(stop_task)`，`stop_task` 会被立即调用，后台任务刚注册就被停了，返回的 `None` 也不是清理函数。包一层 `lambda: stop_task` 后，`effect` 拿到的是能返回停止函数的函数：立即执行它拿到 `stop_task`，还没调用，把 `stop_task` 登记进清单。简单说，effect 的参数是怎么启动，返回值是怎么停止。
+为什么多套一层 `lambda`？`effect` 会立即调用收到的启动函数。如果直接写
+`ctx.effect(stop_task)`，它会把 `stop_task` 误当作启动函数并立即执行，得到的
+`None` 也不是清理函数。包一层 `lambda: stop_task` 后，`effect` 调用 lambda
+得到的是 `stop_task` 函数本身，并不会执行它，于是可以把它登记进清理清单。
+简单说，effect 的参数描述怎么启动，返回值描述怎么停止。
 
 为什么清理不能靠自觉？插件作者在插件函数末尾手写清理逻辑。插件可能提前 `return`、可能中途抛异常、可能被别的插件卸载，每一条路径都要记得清理，漏一条就是资源泄漏。effect 把清理交给句柄统一执行，作者只需要在创建资源的同一行交出清理方式。官方 cordis 的 effect 正是同一设计，所有副作用都从这一个入口进入，卸载时统一回收。
 
@@ -319,10 +323,10 @@ uv run python chapters/03-python-cordis/src/demo.py
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`vendor/cordis/src/context.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/vendor/cordis/src/context.ts) | `Context` | 官方 Context 是 Proxy，服务属性读取会进入反射层；第 04 章用 Python `__getattr__` 表达同一约束 |
-| [`vendor/cordis/src/fiber.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/vendor/cordis/src/fiber.ts) | `PluginHandle` | 官方把插件句柄叫 fiber，拥有更完整的安装、依赖与卸载状态机 |
+| [`vendor/cordis/src/context.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/vendor/cordis/src/context.ts) | `Context` | 官方 Context 是 Proxy，服务属性读取会进入反射层；第 04 章用 Python `__getattr__` 表达同一约束 |
+| [`vendor/cordis/src/fiber.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/vendor/cordis/src/fiber.ts) | `PluginHandle` | 官方把插件句柄叫 fiber，拥有更完整的安装、依赖与卸载状态机 |
 | 同上 | `effect` | 官方 effect 同样立即执行并收集清理函数，还支持异步清理与更完整的错误隔离 |
-| [`vendor/cordis/src/reflect.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/vendor/cordis/src/reflect.ts) | 第 04 章 | 官方拒绝读取未声明的服务，第 04 章对齐这一依赖显式化规则 |
+| [`vendor/cordis/src/reflect.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/vendor/cordis/src/reflect.ts) | 第 04 章 | 官方拒绝读取未声明的服务，第 04 章对齐这一依赖显式化规则 |
 
 没有实现的部分包括官方的热重载、配置 schema 校验、异步 effect 等工程能力，它们不在教学范围里。核心的依赖注入与服务作用域正是下一章的内容。
 

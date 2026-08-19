@@ -61,14 +61,17 @@ OpenAI 兼容协议里，模型回复一条消息时可以走两条通道之一�
 2. `id` 是本次调用的身份证。工具结果回灌时必须带上它，让模型知道这条结果是回答哪次调用的。
 3. `content` 是 `null`。模型请求工具时通常不说话，文字通道空着。
 
-### 完整往返的四个 step
+### 完整往返的四个阶段
 
 ```
-第一个 step：把问题与工具说明书发给模型
-第二个 step：模型不回答，返回 tool_calls 请求
-第三个 step：执行工具，把结果作为新消息回灌，再问模型
-第四个 step：模型基于结果走文字通道，给出最终答案
+第一阶段：把问题与工具说明书发给模型
+第二阶段：模型不回答，返回 tool_calls 请求
+第三阶段：执行工具，把结果作为新消息回灌，再问模型
+第四阶段：模型基于结果走文字通道，给出最终答案
 ```
+
+按照第 07 章会正式定义的术语，这四个阶段构成两个 step：第一次模型调用
+和随后的工具执行属于 step 1，回灌结果后的第二次模型调用属于 step 2。
 
 画成时序图：
 
@@ -234,12 +237,14 @@ class ToolCall:
 class Message:
     role: str
     content: str | None = None
+    reasoning_content: str | None = None
     tool_calls: tuple[ToolCall, ...] = ()
     tool_call_id: str | None = None
 ```
 
-两个扩展点的作用：
+三个扩展点的作用：
 
+- `reasoning_content` 保存模型返回的思考内容。它不直接显示给用户，但属于 assistant 历史；后续请求必须按原文回传。rc.8 将这条规则统一到所有带思考的 assistant 轮次，不再只回传同时带工具调用的轮次。
 - `tool_calls` 挂在 `assistant` 消息上，表示这条回复里模型请求调用这些工具。用 `tuple` 而不是 `list`，配合 `frozen=True` 的不可变性承诺，tuple 自身不可变。
 - `tool_call_id` 挂在 `role="tool"` 的消息上，与 `ToolCall.id` 一一对应。协议规定工具结果回灌时必须标明它是回答哪次调用的，模型一轮可能同时请求多个工具，没有 id 就对不上号。
 
@@ -305,14 +310,16 @@ class DeepSeekClient:
         return Message(
             role="assistant",
             content=raw_message.get("content"),
+            reasoning_content=raw_message.get("reasoning_content"),
             tool_calls=tuple(tool_calls),
         )
 ```
 
-三处与第 01 章的差异：
+四处与第 01 章的差异：
 
 - 返回值从 `str` 变成 `Message`。模型回复现在可能有调用无文字，只返回字符串会丢掉信息。从这里开始，客户端始终返回完整的 `Message`。
 - `tools` 清单里每个工具包一层 `{"type": "function", "function": {...}}`，这是协议要求的嵌套结构，`type` 固定为 `"function"`。
+- `reasoning_content` 单独保存模型的思考内容，下一次请求会按原文回传，不与给用户显示的 `content` 混在一起。
 - `raw_message.get("tool_calls") or []` 是兜底，普通文字回复里没有这个字段，用 `get` 加空列表避免 KeyError。
 
 `_wire_message` 负责反向转换，内部 `Message` 转协议 dict，其中 `role="tool"` 的消息必须带上 `tool_call_id`：
@@ -323,6 +330,10 @@ class DeepSeekClient:
         wire: dict[str, Any] = {"role": m.role}
         if m.content is not None:
             wire["content"] = m.content
+        elif m.role == "assistant":
+            wire["content"] = ""
+        if m.reasoning_content:
+            wire["reasoning_content"] = m.reasoning_content
         if m.tool_calls:
             wire["tool_calls"] = [
                 {
@@ -337,7 +348,9 @@ class DeepSeekClient:
         return wire
 ```
 
-## 2.5 Agent 循环：把四个 step 串起来
+assistant 没有可见文本时仍发送空字符串 `content`，而不是 `null` 或直接省略；部分兼容网关会拒绝缺少文本且没有工具调用的思考历史。非空 `reasoning_content` 会按原文回传，`tool_calls` 和 `tool_call_id` 则各自在需要时出现。
+
+## 2.5 Agent 循环：把四个阶段串起来
 
 模型已经能够请求工具，程序也已经能够执行工具，下一步是把请求、执行和回传串成循环：
 
@@ -416,7 +429,7 @@ uv run python chapters/02-tool-calling/src/demo.py
 答案是 **7**。
 ```
 
-对照 2.1 的四个 step：模型请求了工具，我们执行并回灌，模型基于 7.0 给出最终答案。模型最后的回答里主动展示了运算过程，它读懂了工具结果，并把它组织成人话。
+对照 2.1 的四个阶段：模型请求了工具，我们执行并回灌，模型基于 7.0 给出最终答案。模型最后的回答里主动展示了运算过程，它读懂了工具结果，并把它组织成人话。
 
 ### 错误路径：模型怎样面对失败
 
@@ -441,17 +454,18 @@ uv run python chapters/02-tool-calling/src/demo.py
 ## 本章小结
 
 - `Tool` 与 `calculator`：工具等于给模型看的说明书加给程序跑的执行器；计算器用递归下降解析器实现，拒绝 `eval`
-- `ToolCall` 与扩展后的 `Message`：工具请求、`tool` 角色回灌、`tool_call_id` 对应关系
+- `ToolCall` 与扩展后的 `Message`：思考内容回传、工具请求、`tool` 角色回灌、`tool_call_id` 对应关系
 - `DeepSeekClient.chat()` 升级：注入 `tools` 清单、解析 `tool_calls`、返回完整 `Message`
-- `run_agent()`：四 step 循环，终止条件、错误回灌、多工具执行三个关键决策
+- `run_agent()`：两 step 的最小往返，终止条件、错误回灌、多工具执行三个关键决策
 
 ## 对照官方
 
 | 官方代码 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/core/agent-loop/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/core/agent-loop/README.zh.md) | `run_agent()` | 官方循环同样记录工具调用与结果并回灌；它是流式、多 step 的完整版，第 07 章继续对齐 |
-| [`packages/core/tools/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/core/tools/README.zh.md) | `Tool` | 官方 `ToolDefinition` 注册进 `ctx.tools`，执行经过 pre-execute、execute、post-execute 管线 |
-| [`packages/llm/llm/src/assembler.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/llm/llm/src/assembler.ts) | `chat()` 的解析 | 官方组装器在流式模式下逐分片拼装 tool-call 块；本章用非流式 `chat()` 拿完整 tool_calls，流式工具分片见练习 4 |
+| [`packages/core/agent-loop/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/core/agent-loop/README.zh.md) | `run_agent()` | 官方循环同样记录工具调用与结果并回灌；它是流式、多 step 的完整版，第 07 章继续对齐 |
+| [`packages/core/tools/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/core/tools/README.zh.md) | `Tool` | 官方 `ToolDefinition` 注册进 `ctx.tools`，执行经过 pre-execute、execute、post-execute 管线 |
+| [`packages/llm/llm/src/assembler.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/llm/src/assembler.ts) | `chat()` 的解析 | 官方组装器在流式模式下逐分片拼装 tool-call 块；本章用非流式 `chat()` 拿完整 tool_calls，流式工具分片见练习 4 |
+| [`packages/llm/llm-deepseek/src/serialize.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/llm-deepseek/src/serialize.ts) | `_wire_message()` | 对齐 assistant 空文本与每个带思考轮次的 `reasoning_content` 回传；教学版消息仍是纯文本，不实现官方图片附件序列化 |
 
 ## 练习
 

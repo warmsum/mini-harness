@@ -13,7 +13,7 @@ DeepSeek Harness 将这项能力实现为独立后端包 session-persistence-jso
 - 把 `SessionEvent` 按 JSONL 格式写入文件并重新加载；
 - 首次创建时原子发布，后续只追加尚未落盘的事件；
 - 校验文件头、格式版本和事件编号；
-- 识别残缺尾行，并为未闭合轮次补充崩溃收尾事件。
+- 识别残缺尾行，并在恢复出的 Session 中为未闭合工具、step 与 turn 补充崩溃收尾事件。
 
 ## 8.1 三个必须回答的问题
 
@@ -51,6 +51,8 @@ class JsonlStore:
 - 每行一条事件，事件四元组 id、type、ts、data 原样序列化。`ensure_ascii=False` 让中文原样保存，文件里的人类可读性更好。
 - 首次发布使用临时文件、`fsync` 和 `os.replace`；后续调用验证前缀后仅追加。这保留了官方“已公开历史永不重写”的核心语义。
 
+这里假设只有一个写进程。`exists()` 后再 `os.replace()` 不能阻止两个进程同时首次发布；教学版也没有文件锁。单进程下它能避免暴露半文件，但不能宣称具备跨进程的 no-clobber 保证。
+
 ## 8.3 读回：校验与崩溃修复
 
 ```python
@@ -62,7 +64,7 @@ class JsonlStore:
         if torn_offset is not None:
             with self.path.open("r+b") as file:
                 file.truncate(torn_offset)
-            _append_recovery_closers(events)
+        _append_recovery_closers(events)
         return Session.from_log(events)
 ```
 
@@ -70,7 +72,7 @@ class JsonlStore:
 
 1. 文件不存在直接抛 `FileNotFoundError`，调用方不该拿到一个空会话假装一切正常。
 2. header 校验失败立即抛错。读到别人的文件、未来版本的文件，都该响亮失败而不是猜。
-3. `_read_records` 只把末尾未换行片段标为 torn tail；完整坏行一律报错。修复后按开放状态依次合成缺失的 `tool/result`、`step/end` 和真实 turn 编号的 `turn/end`，不会再写死 `turn=0`。
+3. `_read_records` 只把末尾未换行片段标为 torn tail；完整坏行一律报错。截断后，加载器总会扫描开放状态，并依次合成缺失的 `tool/result`、`step/end` 和真实 turn 编号的 `turn/end`，不会再写死 `turn=0`。这一步不能只在出现 torn tail 时执行：进程也可能恰好在一条完整事件写完后、收尾事件写入前崩溃。
 
 最后，`Session.from_log` 继续执行第 05 章建立的 id 连续性校验。
 
@@ -106,22 +108,22 @@ uv run python chapters/08-persistence/src/demo.py
   ← 残缺尾行被截断，缺失的轮次收尾被合成 turn/end 补上
 ```
 
-第 ③ 节由 demo 主动制造损坏：先删除最后一行 turn/end，模拟轮次尚未写完；再追加半行，模拟进程在写事件时退出。加载器截断残缺行，并合成收尾事件，使磁盘日志恢复第 05 章定义的轮次闭合约束。
+第 ③ 节由 demo 主动制造损坏：先删除最后一行 turn/end，模拟轮次尚未写完；再追加半行，模拟进程在写事件时退出。加载器会截断磁盘上的残缺片段，并在返回的内存 Session 中合成收尾事件。即使磁盘末尾是完整行，只要工具、step 或 turn 仍开放，也会合成相同的崩溃收尾。合成事件不会在 `load()` 内自动写回；调用方随后对恢复出的 Session 执行 `save()`，它们才会追加到磁盘。
 
 ## 本章小结
 
 - `JsonlStore.save()`：首次原子发布、前缀校验、后续仅追加
-- `JsonlStore.load()`：严格 header/事件校验，只修复 torn tail，合成工具/step/turn 收尾
+- `JsonlStore.load()`：严格 header/事件校验，只截断 torn tail，并始终按开放状态合成工具/step/turn 收尾
 - 三层防御加 `from_log` 连续性校验的完整恢复链
 
 ## 对照官方
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/session/session-persistence-jsonl/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/session/session-persistence-jsonl/README.zh.md) | `JsonlStore` | 对齐仅追加 JSONL、首次无覆盖发布与恢复前校验；具体原子发布原语因平台而不同 |
+| [`packages/session/session-persistence-jsonl/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/session/session-persistence-jsonl/README.zh.md) | `JsonlStore` | 对齐仅追加 JSONL 与恢复前校验；教学版首次写使用 `os.replace`，不具备官方跨进程 no-clobber 发布的完整保证 |
 | 同上 | `save` | 两者都首次原子发布、随后仅追加；官方额外实现批量 append、写失败回滚与跨平台发布细节 |
 | 同上 | （未实现） | 官方还会打包连续流式分片并支持 zstd 压缩；这些是存储优化，教学版不实现 |
-| 同上 | 崩溃修复 | 两者只截断真正不完整的尾部，并按开放状态合成工具、step 与 turn closer；中间损坏响亮失败 |
+| 同上 | 崩溃修复 | 教学版只截断真正不完整的尾部，再按开放状态合成工具、step 与 turn closer；中间损坏响亮失败 |
 
 官方还用协调器订阅 session/event、按窗口批量 flush，并以 zstd checksum frame 作为默认物理格式；教学版由调用方显式 `save()`，每次把尚未保存的尾部追加进去。
 

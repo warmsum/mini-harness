@@ -1,6 +1,6 @@
 """第 10 章：文件工具 —— 模型读写文件的手。
 
-四个工具：read_file / write_file / edit_file / grep。
+五个工具：read_file / write_file / edit_file / grep / glob。
 外加「读后写」观察策略（对应官方 fs-observation-policy 的 CAS 思想）：
 - 修改已存在的文件，必须先 read 过它（FS_NOT_OBSERVED）；
 - read 之后文件被外部改动过，写入要拒绝（FS_STALE_VERSION）——
@@ -52,7 +52,7 @@ class ObservationTracker:
 
 
 # ---------------------------------------------------------------------------
-# 四个文件工具
+# 五个文件工具
 # ---------------------------------------------------------------------------
 
 

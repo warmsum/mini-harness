@@ -1,4 +1,4 @@
-"""第 05 章：事件日志 —— 会话的「唯一事实来源」。
+"""事件日志：会话的「唯一事实来源」（第 05 章首次实现）。
 
 对应官方 packages/core/session（事件溯源的会话日志）。
 核心思想：
@@ -89,7 +89,7 @@ class Session:
 
         1. 校验 data 是可序列化的纯 JSON（拒绝函数、集合等）；
         2. 冻结 data——日志是不可变历史，防任何后续篡改；
-        3. 缓存快照失效，通知订阅者（持久化插件的接缝，第 08 章兑现）。
+        3. 缓存快照失效，通知订阅者（持久化等消费者的接缝）。
         """
         frozen_data = _freeze_json(data)
         event = SessionEvent(id=len(self._log), type=type, ts=_now(), data=frozen_data)
@@ -138,7 +138,7 @@ class Session:
 
         只有三种事件会投影成消息（对应官方 surface 层）：
           user/message      → role="user"
-          assistant/message → role="assistant"（含 tool_calls）
+          assistant/message → role="assistant"（含 reasoning_content、tool_calls）
           tool/result       → role="tool"（带 tool_call_id）
         其余事件（turn/start、tool/call、turn/end……）只记日志，不发给模型。
         """
@@ -242,12 +242,14 @@ def _derive_event_message(event: SessionEvent) -> Message | None:
             ToolCall(id=c["id"], name=c["name"], arguments=c["arguments"])
             for c in raw_calls
         )
-        # 空内容且无工具调用的事件不投影（它只是日志记录）
-        if event.data.get("content") is None and not tool_calls:
+        reasoning_content = event.data.get("reasoning_content")
+        # 文本、思考与工具调用都没有的事件不投影（它只是日志记录）
+        if event.data.get("content") is None and not reasoning_content and not tool_calls:
             return None
         return Message(
             role="assistant",
             content=event.data.get("content"),
+            reasoning_content=reasoning_content,
             tool_calls=tool_calls,
         )
     if event.type == "tool/result":

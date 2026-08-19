@@ -197,10 +197,11 @@ class GoalStore:
 
     @classmethod
     def replay(cls, session: Session) -> "GoalStore":
-        """严格回放：只从 goal/change 事件派生状态。
+        """连续性回放：只从 goal/change 与 goal 来源消息派生状态。
 
         revision 连续性只在同一目标内检查——每个新目标（id 不同）
-        的 revision 都从 1 重新开始（create 生成 revision=1）。"""
+        的 revision 都从 1 重新开始（create 生成 revision=1）。教学版未实现
+        官方 invariant 的完整形状、生命周期迁移和时间戳校验。"""
         store = cls(session)
         for event in session.events:
             if event.type == "user/message":

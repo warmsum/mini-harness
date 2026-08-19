@@ -82,7 +82,7 @@ class Session:
 
 1. `_freeze_json(data)` 在写入前校验并冻结。它拒绝循环引用、非字符串对象键、非有限数、负零、超出 JSON 安全范围的整数和非 JSON 类型；列表变成元组，字典变成仍可序列化的 `FrozenDict`。事件和 `events` 元组都不能被调用方改写。
 2. `self._snapshot = None` 让外部读日志走 `events` 属性拿缓存快照，append 后缓存失效，下次读取重建，高频读取不被每次全量复制拖慢。
-3. 通知订阅者。`subscribe` 挂在 Session 上的观察者实时收到新事件。官方的持久化插件正是这样工作的，官方文档写明插件订阅 session/event，在 flush 时刷新。第 08 章我们自己也写一个这样的插件。
+3. 通知订阅者。`subscribe` 挂在 Session 上的观察者实时收到新事件。官方的持久化插件正是这样工作的，官方文档写明插件订阅 session/event，在 flush 时刷新。第 08 章实现文件存储并显式调用 `save()`；把存储自动接到 `subscribe` 留作该章练习。
 
 ## 5.4 哪些事件进模型，哪些只进日志
 
@@ -107,11 +107,13 @@ def _derive_event_message(event: SessionEvent) -> Message | None:
             ToolCall(id=c["id"], name=c["name"], arguments=c["arguments"])
             for c in raw_calls
         )
-        if event.data.get("content") is None and not tool_calls:
+        reasoning_content = event.data.get("reasoning_content")
+        if event.data.get("content") is None and not reasoning_content and not tool_calls:
             return None
         return Message(
             role="assistant",
             content=event.data.get("content"),
+            reasoning_content=reasoning_content,
             tool_calls=tool_calls,
         )
     if event.type == "tool/result":
@@ -128,7 +130,7 @@ def _derive_event_message(event: SessionEvent) -> Message | None:
 | 事件 | 投影结果 | 说明 |
 |------|----------|------|
 | `user/message` | `role="user"` | 人的话 |
-| `assistant/message` | `role="assistant"` | 模型的话，可能带 tool_calls |
+| `assistant/message` | `role="assistant"` | 模型的话，可能带 reasoning_content 与 tool_calls |
 | `tool/result` | `role="tool"` | 工具结果，带 tool_call_id 对应 |
 | `request/header`、step/turn 边界、`tool/call` | 不投影 | 请求与过程记录，只进日志 |
 
@@ -190,7 +192,7 @@ def run_agent(client, tools, system_prompt, user_prompt, max_steps=10) -> Sessio
 uv run python chapters/05-session-log/src/demo.py
 ```
 
-真实输出，模型回复内容每次不同，事件结构稳定：
+下面是模型调用一次 calculator、经过两个 step 后作答时的代表性输出。回复文本、tool call id 和 step 数可能随模型行为变化，但每个 step 的开始与结束、请求头和 turn 边界都会被记录：
 
 ```
 === ① 订阅者视角 ===
@@ -199,11 +201,16 @@ uv run python chapters/05-session-log/src/demo.py
 === ② 事件日志原文（唯一事实来源） ===
   #0  turn/start           {'turn': 1}
   #1  user/message         {'content': '1+2*3 等于几？'}
-  #2  assistant/message    {'content': '', 'tool_calls': ({'id': 'call_00_...', 'name': 'calculator', 'arguments': '{"expression": "1+2*3"}'},)}
-  #3  tool/call            {'call_id': 'call_00_...', 'name': 'calculator', 'arguments': '{"expression": "1+2*3"}'}
-  #4  tool/result          {'call_id': 'call_00_...', 'content': '7.0', 'is_error': False}
-  #5  assistant/message    {'content': '根据计算，**1 + 2 × 3 = 7**。\n\n这里需要注意运算顺序：先算乘法（2 × 3 = 6），再算加法（1 + 6 = 7）。', 'tool_calls': ()}
-  #6  turn/end             {'turn': 1, 'reason': 'completed'}
+  #2  request/header       {'header': {...}, 'reason': 'initial'}
+  #3  step/start           {'turn': 1, 'step': 1}
+  #4  assistant/message    {'content': '', 'tool_calls': ({'id': 'call_00_...', 'name': 'calculator', ...},)}
+  #5  tool/call            {'call_id': 'call_00_...', 'name': 'calculator', 'arguments': '{"expression": "1+2*3"}'}
+  #6  tool/result          {'call_id': 'call_00_...', 'content': '7.0', 'is_error': False}
+  #7  step/end             {'turn': 1, 'step': 1}
+  #8  step/start           {'turn': 1, 'step': 2}
+  #9  assistant/message    {'content': '根据计算，**1 + 2 × 3 = 7**。', 'tool_calls': ()}
+  #10 step/end             {'turn': 1, 'step': 2}
+  #11 turn/end             {'turn': 1, 'reason': 'completed'}
 
 === ③ 派生消息：模型看到的历史（derive_messages 投影） ===
   [user] 1+2*3 等于几？
@@ -218,7 +225,7 @@ uv run python chapters/05-session-log/src/demo.py
   ← 日志是唯一事实来源：持久化、界面、重放都从它派生
 ```
 
-第 ② 节是事实，7 条事件，含 tool/call 这条不投影的过程记录；第 ③ 节是投影，4 条消息，tool/call 不在其中；第 ④ 节证明投影只依赖日志，同一份日志两次派生结果一致。事件 data 里的列表在冻结后变成元组，这是 5.3 节冻结的痕迹，不可变性的可见证据。
+第 ② 节是事实；在这次两 step 示例中共有 12 条事件，其中 request/header、step 边界和 tool/call 都不投影。第 ③ 节只有 4 条模型消息，第 ④ 节证明投影只依赖日志，同一份日志两次派生结果一致。事件 data 里的列表在冻结后变成元组，这是 5.3 节冻结的痕迹，不可变性的可见证据。
 
 ## 本章小结
 
@@ -232,14 +239,14 @@ uv run python chapters/05-session-log/src/demo.py
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/core/session/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/core/session/README.zh.md) | `Session` | 对齐事件溯源、append 时分离并冻结数据，以及不可由调用方污染的 events 快照 |
+| [`packages/core/session/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/core/session/README.zh.md) | `Session` | 对齐事件溯源、append 时分离并冻结数据，以及不可由调用方污染的 events 快照 |
 | 同上 | `derive_messages` | 官方做增量投影，每个 surface 节点只投影一次；教学版每次全量，长会话成本更高 |
 | 同上 | `subscribe` | 官方持久化插件订阅 session/event，并在 flush 时落盘；第 08 章实现文件存储 |
-| [`packages/core/agent-loop/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/core/agent-loop/README.zh.md) | 循环日志化 | 官方同样把已接纳消息、请求边界与工具调用写入日志，在后续 step 重建模型输入 |
+| [`packages/core/agent-loop/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/core/agent-loop/README.zh.md) | 循环日志化 | 官方同样把已接纳消息、请求边界与工具调用写入日志，在后续 step 重建模型输入 |
 
 ## 练习
 
 1. **投影实验。** 在 `_derive_event_message` 里把 `tool/call` 也投影成一条消息，role 自定，跑一遍 demo，观察模型行为是否变化。变了或不变，各自的原因是什么？
 2. **篡改测试。** 拿到 `session.events` 快照后，尝试修改其中一条事件的 `data` 字典，比如 `events[0].data["content"] = "篡改"`，观察冻结如何拦截。拦截发生在哪一层，是事件对象还是 data 内部？
 3. **断点续跑。** 把 demo 跑一半的日志 `from_log` 重建，再继续追加一条 `user/message`，观察新旧事件自然衔接。这是第 08 章持久化恢复的雏形，描述它和正式恢复的差距。
-4. **设计取舍。** 为什么 system 提示词不进日志？它进了日志会带来什么麻烦，从压缩、fork、多模型三个角度各想一个。
+4. **设计取舍。** system 提示词为什么进入 `request/header`，却不投影成一条长期 surface 消息？从压缩、fork、多模型三个角度比较这两种记录方式。

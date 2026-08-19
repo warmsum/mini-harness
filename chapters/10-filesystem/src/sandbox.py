@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # 三模式词汇（对应官方 sandbox 的模式表）
@@ -38,7 +38,11 @@ class SandboxPolicy:
     """沙箱策略：一个模式 + 一个工作区根。"""
 
     mode: str = READ_ONLY
-    workspace_root: Path = Path.cwd()
+    workspace_root: Path = field(default_factory=Path.cwd)
+
+    def __post_init__(self) -> None:
+        if self.mode not in WIDER_MODES:
+            raise ValueError(f"未知 sandbox mode: {self.mode}")
 
     def writable_roots(self) -> list[Path]:
         """可写根目录集合：工作区根 + 平台临时目录。
@@ -54,8 +58,8 @@ class SandboxPolicy:
 
         规范化（resolve）是核心——攻击路径 `workspace/../etc/passwd`
         在词法上逃出工作区，resolve 后无处遁形。
-        诚实边界：这是「约束」而非「安全边界」，
-        真正的内核级隔离属于第 11 章的 shell 沙箱。"""
+        诚实边界：这是「约束」而非「安全边界」。第 11 章会解释
+        官方 shell 沙箱如何用内核级机制隔离文件影响。"""
         if self.mode == DANGER_FULL_ACCESS:
             return target
         if self.mode == READ_ONLY:
@@ -75,7 +79,8 @@ class SandboxPolicy:
 
 def approve_escalation(policy: SandboxPolicy, requested: str) -> SandboxPolicy:
     """审批升级：请求更宽模式，只有「严格更宽」才可能获批。
-    教学版没有人工审批通道，按表直接放行；第 11 章接上真实审批询问。"""
+    教学版没有人工审批通道，按表直接放行；第 11 章会加入审批决策接口，
+    并用脚本化回调模拟用户回答。"""
     if requested in WIDER_MODES[policy.mode]:
         return SandboxPolicy(mode=requested, workspace_root=policy.workspace_root)
     raise SandboxDeniedError(

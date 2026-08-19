@@ -34,6 +34,7 @@
 class SubagentResult:
     output: str
     stop_reason: str  # "completed" / "max-steps" / "error"
+    diagnostic: str | None = None
 
 
 def run_subagent(client, task, system_prompt, max_steps=3) -> SubagentResult:
@@ -48,21 +49,30 @@ def run_subagent(client, task, system_prompt, max_steps=3) -> SubagentResult:
                 [Message(role="system", content=system_prompt),
                  *session.derive_messages()]
             )
-            session.append("assistant/message", {"content": reply.content, "tool_calls": []})
+            event = {"content": reply.content, "tool_calls": []}
+            if reply.reasoning_content:
+                event["reasoning_content"] = reply.reasoning_content
+            session.append("assistant/message", event)
             partial = reply.content or ""
             if reply.content:
                 session.append("turn/end", {"turn": 1, "reason": "completed"})
                 return SubagentResult(output=reply.content, stop_reason="completed")
+        session.append("turn/end", {"turn": 1, "reason": "max-steps"})
         return SubagentResult(output=partial, stop_reason="max-steps")
     except Exception as error:
-        return SubagentResult(output=partial, stop_reason=f"error: {error}")
+        session.append(
+            "turn/end", {"turn": 1, "reason": "error", "message": str(error)}
+        )
+        return SubagentResult(
+            output=partial, stop_reason="error", diagnostic=str(error)
+        )
 ```
 
 三个教学要点：
 
-1. 全新 Session 是隔离的第一道墙。子 agent 的会话日志从 turn/start 开始，只写 task 与自己的回复，父历史在物理上进不来。
-2. 结构化的结果：SubagentResult 区分 output 与 stop_reason，对应官方 SubagentRun.result 的 output 与 stopReason。被截断的回答不会被报告为成功，也不会被悄悄丢弃。子 agent 跑到一半失败时，它已经生成的内容是有价值的线索，放进 output 一并交回父 agent。
-3. 错误转结果：异常不向上抛，转成 stop_reason。父 agent 看到子任务失败了，原因和部分结果如下，下一轮自己决定重试还是换路。
+1. 全新 Session 是隔离的第一道墙。子 agent 的会话日志从 turn/start 开始，只写 task 与自己的回复，父历史在物理上进不来；completed、max-steps 与 error 三条退出路径都会补上 turn/end。
+2. 结构化的结果：SubagentResult 区分 output、stop_reason 与 diagnostic，对应官方 SubagentRun.result 的三个字段。被截断的回答不会被报告为成功，也不会被悄悄丢弃。子 agent 跑到一半失败时，已经生成的内容仍放在 output；provider 或运行时错误只放在 diagnostic，不能伪装成子 agent 说过的话。
+3. 错误转结果：异常不向上抛，转成 `stop_reason="error"`，具体原因单独放进 diagnostic。父 agent 因而能区分失败类别、诊断信息与部分回答，再决定重试还是换路。
 
 ## 14.3 并行：多个子任务同时跑
 
@@ -108,7 +118,7 @@ subagent_tool = Tool(
 
 description 明确说明“子 agent 看不到当前对话历史，只看到 task 描述”，用于引导模型生成自包含的 task。这是上下文隔离的必要配套，也说明第 02 章中的工具说明书会直接影响模型如何使用工具。
 
-## 14.5 官方 rc.7 的生命周期与 provider
+## 14.5 官方 rc.8 的生命周期与 provider
 
 最新官方实现已经不只有“启动一个子任务并等待”这一条路径。先把两个维度分开：
 
@@ -121,9 +131,11 @@ description 明确说明“子 agent 看不到当前对话历史，只看到 tas
 
 模型工具用 `run_in_background` 选择调度方式。`one-shot` 默认前台，显式传 `true` 才注册后台 job；`continuable` 默认后台，显式传 `false` 才等待当前结果。两者不是同一个概念：一次性任务也能后台跑，可继续子 agent 也能暂时前台等。
 
-provider 通过 capability 声明自己能否在创建前落实 `outputSchema`、`depthLimit`、`toolFilter` 和 `persona`。进程内 spawn/fork 能控制创建窗口，因此可以提供这些能力；最新版还带有独立的 Codex 与 Claude Code provider，它们在父工作区启动原生产品、只接收自包含任务并返回最终文本，不继承父对话，也不声明这些可选能力。是否继承父上下文由 `inheritsParentContext` 单独描述，不能拿来推断权限继承。
+rc.8 进一步明确了两条结果契约。one-shot 失败时，`diagnostic` 保存 provider 提供的非 assistant 诊断，官方限制为 4096 个 UTF-8 字节，父 agent 展示它时仍与部分 output 分开；教学版保留字段分离，但没有实现字节截断。continuable 子 agent 则可主动调用 report 工具；默认 `next-step` 会唤醒父 agent，并把报告送进父 agent 最近的下一个 step，而不是排到一个普通的后续 turn。`quiet` 只注入相同上下文，不主动唤醒父 agent。
 
-本章教学版只实现进程内、隔离上下文、one-shot、foreground 结果，以及同一批调用的线程池并行。它没有后台 job、可继续会话、provider 注册表、能力协商、委派深度、取消与持久化。这个缩减保留了委派的核心数据流，但不能直接替代官方运行时。
+provider 通过 capability 声明自己能否在创建前落实 `outputSchema`、`depthLimit`、`toolFilter` 和 `persona`。进程内 spawn/fork 能控制创建窗口，因此可以提供这些能力；最新版还带有可具名配置的 Codex 与 Claude Code provider，它们在父工作区启动原生产品、只接收自包含任务并返回最终文本，不继承父对话，也不声明这些可选能力。是否继承父上下文由 `inheritsParentContext` 单独描述，不能拿来推断权限继承。
+
+本章教学版只实现进程内、隔离上下文、one-shot、foreground 结果、分离的 diagnostic，以及同一批调用的线程池并行。它没有后台 job、可继续会话、report 投递、provider 注册表、能力协商、委派深度、取消与持久化。这个缩减保留了委派的核心数据流，但不能直接替代官方运行时。
 
 ## 14.6 运行完整示例
 
@@ -160,7 +172,7 @@ uv run python chapters/14-subagents-workflow/src/demo.py
 
 ## 本章小结
 
-- `run_subagent`：独立 Session 的子 agent 循环、结构化结果、失败保留部分文本
+- `run_subagent`：独立 Session 的子 agent 循环、结构化结果、失败诊断与部分文本分离
 - `run_subagents_parallel`：线程池并行
 - `create_subagent_tool`：委派工具，description 引导自包含 task
 - 上下文隔离的物理机制与 token 账
@@ -169,15 +181,15 @@ uv run python chapters/14-subagents-workflow/src/demo.py
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/subagent/tool-subagent/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/subagent/tool-subagent/README.zh.md) | `create_subagent_tool` | 对齐模型面委派、失败保留部分文本与同级调用并发；官方还支持 `run_in_background` |
-| [`packages/subagent/subagent/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/subagent/subagent/README.zh.md) | `run_subagent` | 官方通过具名 provider 统一进程内、进程外和未来传输，并区分 one-shot 与 continuable |
-| [`packages/subagent/subagent-fork-in-process/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/subagent/subagent-fork-in-process/README.zh.md) | （未实现） | fork 以父级已完成轮次为初始内容；教学版始终从空历史开始 |
-| [`packages/subagent/subagent-codex/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/subagent/subagent-codex/README.zh.md) / [`subagent-claude-code`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/subagent/subagent-claude-code/README.zh.md) | （未实现） | 最新官方 provider 可委派给原生 Codex 或 Claude Code；二者都是隔离上下文的一次性运行 |
-| [`packages/workflow/tool-workflow/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/workflow/tool-workflow/README.zh.md) | （练习 4） | 官方 workflow 用脚本编排扇出 subagent，更大规模的多 agent 编排 |
+| [`packages/subagent/tool-subagent/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/subagent/tool-subagent/README.zh.md) | `create_subagent_tool` | 对齐模型面委派、失败诊断与部分文本分离、同级调用并发；官方还支持 `run_in_background` |
+| [`packages/subagent/subagent/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/subagent/subagent/README.zh.md) | `run_subagent` | 官方通过具名 provider 统一进程内、进程外和未来传输，并区分 one-shot 与 continuable |
+| [`packages/subagent/subagent-fork-in-process/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/subagent/subagent-fork-in-process/README.zh.md) | （未实现） | fork 以父级已完成轮次为初始内容；教学版始终从空历史开始 |
+| [`packages/subagent/subagent-codex/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/subagent/subagent-codex/README.zh.md) / [`subagent-claude-code`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/subagent/subagent-claude-code/README.zh.md) | （未实现） | 最新官方 provider 可委派给原生 Codex 或 Claude Code；二者都是隔离上下文的一次性运行 |
+| [`packages/workflow/tool-workflow/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/workflow/tool-workflow/README.zh.md) | （练习 4） | 官方 workflow 用脚本编排扇出 subagent，更大规模的多 agent 编排 |
 
 ## 练习
 
 1. **隔离的代价。** 让父 agent 委派一个依赖上文的任务，例如继续上面的重构，观察子 agent 缺少哪些必要信息；再把这些信息写进 task 后重试，比较两次结果，说明隔离为什么要求 task 自包含。
-2. **失败传播。** 给子 agent 的 system_prompt 里加入总是回答我不知道的设定，观察 SubagentResult 与主 agent 收到 completed 但无意义的输出时的表现；再模拟子 agent 抛异常，比如断网，观察 stop_reason=error 的路径。
+2. **失败传播。** 给子 agent 的 system_prompt 里加入总是回答我不知道的设定，观察 SubagentResult 与主 agent 收到 completed 但无意义的输出时的表现；再模拟子 agent 抛异常，比如断网，观察 `stop_reason="error"`、diagnostic 与部分 output 如何保持分离。
 3. **fork 语义。** 读官方 fork 文档，设计一个 fork=True 参数：子 agent 的 Session 用父历史截至最后一个 turn/end 初始化，实现并对比隔离版与 fork 版的 token 消耗。
 4. **workflow 探索。** 读官方 workflow 文档，说明脚本编排多个 subagent 相比模型逐轮调用 subagent 工具的优势与成本，从确定性、可复现、上限控制三个角度想。

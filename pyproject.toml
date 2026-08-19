@@ -12,6 +12,7 @@ license = { file = "LICENSE" }
 dependencies = [
   "httpx>=0.28,<1",
   "httpx-sse>=0.4,<1",
+  "python-dotenv>=1.1,<2",
 ]
 
 [project.scripts]

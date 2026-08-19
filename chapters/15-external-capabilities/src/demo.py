@@ -18,7 +18,9 @@ from web_tools import WebSearchClient, web_fetch
 def main() -> None:
     print("=== ① Web Search：真实搜索 DeepSeek Harness ===")
     client = WebSearchClient()
-    result = client.search("DeepSeek Harness 是什么？官方仓库地址")
+    queries = ["DeepSeek Harness 是什么？", "DeepSeek Harness 官方仓库地址"]
+    print(f"  queries: {queries}")
+    result = client.search(queries)
     print(f"  来源（{len(result.sources)} 条）：")
     for source in result.sources:
         print(f"  - {source.title}")

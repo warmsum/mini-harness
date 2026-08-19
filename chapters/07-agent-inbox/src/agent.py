@@ -127,6 +127,11 @@ class Agent:
                     "assistant/message",
                     {
                         "content": reply.content,
+                        **(
+                            {"reasoning_content": reply.reasoning_content}
+                            if reply.reasoning_content
+                            else {}
+                        ),
                         "tool_calls": [
                             {"id": c.id, "name": c.name, "arguments": c.arguments}
                             for c in reply.tool_calls

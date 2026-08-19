@@ -6,7 +6,7 @@
 演示：
 1. Goal 完整生命周期：create → admit_round → pause → resume → block → resume → complete
 2. revision 守卫：拿着过期引用操作 → 拒绝
-3. 事件溯源：goal/change 事件串 + 严格回放
+3. 事件溯源：goal/change 事件串 + 连续性回放
 4. todo：整体替换 + 校验（重复 content / 非法 status）
 """
 
@@ -75,7 +75,7 @@ def main() -> None:
     except ValueError as e:
         print(f"  {e}")
 
-    section("③ 事件溯源：goal/change 事件与严格回放")
+    section("③ 事件溯源：goal/change 事件与连续性回放")
     for event in session.events:
         if event.type == "goal/change":
             data = event.data

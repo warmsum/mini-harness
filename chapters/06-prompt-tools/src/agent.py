@@ -30,24 +30,33 @@ def run_agent(
 
     session.append("turn/start", {"turn": 1})
     session.append("user/message", {"content": user_prompt})
-    system_prompt = assembler.render(variables)
-    session.append(
-        "request/header",
-        {
-            "header": {
-                "config": {"provider": "deepseek", "model": client.MODEL},
-                "system": system_prompt,
-                "tools": registry.schemas(),
-            },
-            "reason": "initial",
-        },
-    )
+    request_header: str | None = None
 
     try:
         for step in range(1, max_steps + 1):
             session.append("step/start", {"turn": 1, "step": step})
             completed = False
             try:
+                # Prompt provider 可能返回运行时值，因此每个 step 都重新组装。
+                system_prompt = assembler.render(variables)
+                header = {
+                    "config": {"provider": "deepseek", "model": client.MODEL},
+                    "system": system_prompt,
+                    "tools": registry.schemas(),
+                }
+                header_fingerprint = json.dumps(
+                    header, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                )
+                if header_fingerprint != request_header:
+                    session.append(
+                        "request/header",
+                        {
+                            "header": header,
+                            "reason": "initial" if request_header is None else "change",
+                        },
+                    )
+                    request_header = header_fingerprint
+
                 messages = [
                     Message(role="system", content=system_prompt),
                     *session.derive_messages(),
@@ -57,6 +66,11 @@ def run_agent(
                     "assistant/message",
                     {
                         "content": reply.content,
+                        **(
+                            {"reasoning_content": reply.reasoning_content}
+                            if reply.reasoning_content
+                            else {}
+                        ),
                         "tool_calls": [
                             {"id": c.id, "name": c.name, "arguments": c.arguments}
                             for c in reply.tool_calls

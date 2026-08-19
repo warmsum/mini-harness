@@ -36,7 +36,7 @@ Agent 连续跑了三个小时的长任务，中途可能发生这些事：
 | `edit` | 改目标文本 | 保留 phase、blocker reason 与 activation |
 | `pause` / `resume` | 暂停 / 恢复 | 停用 / 恢复续行；resume 清除阻塞原因 |
 | `complete` | 完成 | 停用续行 |
-| `block` | 阻塞 | 记录规范化文本说明，只用一个持久 phase |
+| `block` | 阻塞 | 记录文本说明，只用一个持久 phase |
 
 两个关键的官方设计决策：
 
@@ -89,7 +89,7 @@ class Goal:
 
 为什么每个动词都要带引用、检查 revision？看两个并发场景：Agent A 拿着 r3 的引用决定暂停，同时 Agent B 已经把目标推进到 r5。A 基于过期的状态做决定，pause 会覆盖 B 的进展。revision 守卫让基于旧状态的决策在提交时被响亮拒绝。官方也使用 `GoalRef { id, revision }` 作为比较并设置防护。
 
-## 13.3 事件溯源与严格回放
+## 13.3 事件溯源与连续性回放
 
 每个动词最后都做同一件事，`_commit` 追加事件：
 
@@ -117,12 +117,16 @@ class Goal:
                     ...
                 continue
             if event.type == "goal/change":
-                # 校验 operation、完整快照、revision 或 clear tombstone。
+                # 校验完整快照、revision 或 clear tombstone。
                 ...
         return store
 ```
 
 一个细节：`admit_round()` 追加的是带 goal source 的 `user/message`。round 是已接纳目标消息的投影，不是一次目标配置变更，因此 `rounds_started` 增加，revision 保持不变。revision 连续性只在同一目标内检查；每个新目标又从 r1 开始。
+
+这里的“连续性回放”是教学子集：它校验 goal id、revision、round 和 clear
+tombstone 的连续关系，但没有实现官方 invariant 模块的完整形状校验、非法
+生命周期迁移校验与时间戳单调性检查。练习 2 会继续补生命周期迁移规则。
 
 ## 13.4 Todo：整体替换式任务清单
 
@@ -179,7 +183,7 @@ uv run python chapters/13-goal-plan-todo/src/demo.py
 ━━━ ② revision 守卫：过期引用被拒绝 ━━━
   引用指向不同的目标（ref=goal-0 != 当前=goal-7）
 
-━━━ ③ 事件溯源：goal/change 事件与严格回放 ━━━
+━━━ ③ 事件溯源：goal/change 事件与连续性回放 ━━━
   #0  goal/change create r1 [active]
   #2  goal/change pause r2 [paused]
   #3  goal/change resume r3 [active]
@@ -203,7 +207,7 @@ uv run python chapters/13-goal-plan-todo/src/demo.py
 
 - `Goal` 快照与四阶段状态机、六动词
 - `GoalRef` 与 `_require`：id 与 revision 双重 Compare-and-Swap 守卫
-- `goal/change` 完整快照、clear tombstone 与 goal 来源消息的严格回放
+- `goal/change` 完整快照、clear tombstone 与 goal 来源消息的连续性回放
 - `todo_write`：整体替换、三值状态、trim 后去重与并行进行中策略
 - 官方两个关键决策：单一目标、续行绝不持久化
 
@@ -211,9 +215,9 @@ uv run python chapters/13-goal-plan-todo/src/demo.py
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/goal/goal/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/goal/goal/README.zh.md) | `GoalStore` | 对齐事件溯源、GoalRef 守卫、单一目标、六动词、完整快照和续行不持久化 |
+| [`packages/goal/goal/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/goal/goal/README.zh.md) | `GoalStore` | 保留事件溯源、GoalRef 守卫、单一目标、六动词、完整快照和续行不持久化；回放校验只实现连续性子集 |
 | 同上 | `admit_round` | 官方只有来源为 goal 且已准入的 `user/message` 才推进正数 Round；普通人类轮次不增加 `roundsStarted` |
-| [`packages/todo/tool-todo/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/todo/tool-todo/README.zh.md) | `todo_write` | 对齐整体替换、完整快照、三值状态、内容校验与可配置的并行进行中策略 |
+| [`packages/todo/tool-todo/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/todo/tool-todo/README.zh.md) | `todo_write` | 对齐整体替换、完整快照、三值状态、内容校验与可配置的并行进行中策略 |
 
 官方还有一块本章未展开：plan mode。修改文件前先出方案、经用户批准再动手的计划审查机制。它与 Goal 与 Todo 是不同维度，方案审查对进度管理，留作练习 4 的探索方向。
 

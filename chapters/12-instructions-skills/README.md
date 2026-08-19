@@ -66,7 +66,13 @@ class SkillCatalog:
             skill_file = skill_dir / "SKILL.md"
             if not skill_file.is_file():
                 continue
-            frontmatter = _parse_frontmatter(skill_file.read_text(encoding="utf-8"))
+            if not SKILL_NAME.fullmatch(skill_dir.name):
+                raise ValueError(f"无效的技能目录名: {skill_dir.name!r}")
+            frontmatter = _read_frontmatter(skill_file)
+            if frontmatter["name"] != skill_dir.name:
+                raise ValueError(
+                    f"{skill_file} 的 name 必须与目录名 {skill_dir.name!r} 一致"
+                )
             summaries.append(
                 SkillSummary(
                     name=frontmatter["name"],
@@ -88,7 +94,7 @@ class SkillCatalog:
 
 四个要点：
 
-- `list()` 只碰 frontmatter：摘要扫描时不读正文，目录操作的成本与技能正文大小无关。官方 list 返回的同样是胜出摘要，按名称排序。
+- `list()` 通过 `_read_frontmatter()` 读到第二个 `---` 就停止：摘要扫描不会加载正文，目录操作的成本与技能正文大小无关。缺失结束分隔符会立即报错。官方 list 返回的同样是胜出摘要，按名称排序。
 - `load()` 无缓存：这是渐进式加载的核心语义。官方强调每次调用都请求正文，而不是在注册表缓存，教学版直译成每次 read_text。
 - frontmatter 是约定：教学版手写一个十几行的解析器，只认 name 与 description 两行。官方用同一约定，配套校验与资源目录，原理一致。
 - 名字也是安全边界：只接受 kebab-case，而且 frontmatter 的 `name` 必须等于目录名。这样 `../other-file` 不能借技能名穿越目录，目录与菜单也不会各说各话。
@@ -165,9 +171,9 @@ Resolve relati…
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/skill/skill/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/skill/skill/README.zh.md) | `SkillCatalog` | 官方同样提供摘要目录、统一内容渲染和每次重新取正文的渐进式加载 |
+| [`packages/skill/skill/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/skill/skill/README.zh.md) | `SkillCatalog` | 官方同样提供摘要目录、统一内容渲染和每次重新取正文的渐进式加载 |
 | 同上 | （未实现） | 官方还支持多来源 provider、宿主与 scope 分层、rank 裁决重名、缓存失效和调用记录；教学版只保留单个磁盘目录 |
-| [`packages/skill/tool-skill/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/skill/tool-skill/README.zh.md) | （练习 2） | 官方把目录消息与 skill 工具做成一个模型面工具插件，模型经它触发加载 |
+| [`packages/skill/tool-skill/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/skill/tool-skill/README.zh.md) | （练习 2） | 官方把目录消息与 skill 工具做成一个模型面工具插件，模型经它触发加载 |
 
 ## 练习
 
