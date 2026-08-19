@@ -2,19 +2,23 @@
 
 > 预计时间：60 分钟 ｜ 前置：完成第 05 章（事件日志） ｜ 本章纯本地运行，不调用模型
 
-第 07 章的 Agent 能连续对话，但连续不等于有目标。一个跨小时、跨会话的
-长任务，比如把内部工具迁移到新框架，需要回答三个问题：现在做到哪了？
-要不要继续？每一小步是什么？把答案存在对话里不可靠，模型会忘、会跑题；
-存在内存里不持久，崩溃就丢。
+第 07 章的 Agent 能连续对话，但连续不等于有目标。一个跨小时、跨会话的长任务，比如把内部工具迁移到新框架，需要回答三个问题：现在做到哪了？要不要继续？每一小步是什么？把答案存在对话里不可靠，模型会忘、会跑题；存在内存里不持久，崩溃就丢。
 
 官方的答案是把这些任务状态升级成一等公民：
 
-- Goal：当前长任务的唯一目标，带生命周期状态机，active、paused、
-  completed、blocked 四相，所有变更作为事件进会话日志；
+- Goal：当前长任务的唯一目标，带生命周期状态机，active、paused、completed、blocked 四相，所有变更作为事件进会话日志；
 - Todo：当前工作的任务清单，模型用整体替换的方式维护。
 
-官方 goal 包文档第一句定调：事件溯源的同会话目标状态。Goal 与第 05 章的
-会话日志同一套哲学：状态是事件的投影，日志是唯一持久权威。
+官方 goal 包将它定义为“事件溯源的同会话目标状态”。这与第 05 章的会话日志采用相同模型：当前状态由事件投影得到，日志是持久化依据。
+
+## 学习目标
+
+完成本章后，你将能够：
+
+- 使用 active、paused、completed、blocked 表示 Goal 生命周期；
+- 用 `GoalRef` 的 id 与 revision 拒绝基于旧状态的修改；
+- 把目标变更写入会话日志，并通过重放恢复当前目标；
+- 使用整体替换的方式维护并校验 Todo 清单。
 
 ## 13.1 原理：为什么目标需要状态机
 
@@ -24,8 +28,7 @@ Agent 连续跑了三个小时的长任务，中途可能发生这些事：
 - 依赖的上游服务挂了，目标是失败，还是等待？
 - 会话崩溃后从磁盘恢复，目标还活着吗，会自动继续吗？
 
-每一件事都要求目标有明确的 phase（阶段），并且阶段之间的迁移有明确规则。
-官方定义了四个阶段与六个动词，全部语义写在 goal 文档第 22 行：
+每一件事都要求目标有明确的 phase（阶段），并且阶段之间的迁移有明确规则。官方定义了四个阶段与六个动词，全部语义写在 goal 文档第 22 行：
 
 | 动词 | 效果 | 官方语义 |
 |------|------|----------|
@@ -37,14 +40,9 @@ Agent 连续跑了三个小时的长任务，中途可能发生这些事：
 
 两个关键的官方设计决策：
 
-决策一，最多只有一个当前目标。不允许同时进行三个目标的模糊状态，长任务
-的推进逻辑要求此刻唯一要完成的事永远清楚。已完成的目标可以换新目标，但
-进行中的只能有一个。
+决策一，最多只有一个当前目标。不允许同时进行三个目标的模糊状态，长任务的推进逻辑要求此刻唯一要完成的事永远清楚。已完成的目标可以换新目标，但进行中的只能有一个。
 
-决策二，续行启用状态绝不持久化。这是最反直觉也最重要的一条。会话崩溃
-恢复后，即使日志里目标 phase 还是 active，Agent 不会自动继续，必须显式
-resume。为什么？恢复后的环境可能变了，工作区换了、依赖没了，自动续跑
-等于在无人看管的状态下继续一个高风险长任务。安全默认是停下等人确认。
+决策二，续行启用状态不持久化。会话从崩溃中恢复后，即使日志中的目标 phase 仍是 active，Agent 也不会自动继续，必须显式 resume。恢复后的工作区和依赖可能已经变化，因此默认停下等待确认比自动续跑更安全。
 
 ## 13.2 GoalStore：动词与 revision 守卫
 
@@ -62,8 +60,7 @@ class Goal:
     blocker_reason: str | None = None
 ```
 
-每个动词都遵循同一个流程：校验、生成新快照、revision 加一、追加
-goal/change 事件。以 resume 为例：
+每个动词都遵循同一个流程：校验、生成新快照、revision 加一、追加 goal/change 事件。以 resume 为例：
 
 ```python
     def resume(self, ref: GoalRef) -> GoalRef:
@@ -74,7 +71,7 @@ goal/change 事件。以 resume 为例：
         return GoalRef(id=current.id, revision=current.revision + 1)
 ```
 
-`_require` 是这套 API 的守卫核心，Compare-and-Swap：
+`_require` 使用 Compare-and-Swap 思路校验调用方持有的引用：
 
 ```python
     def _require(self, ref: GoalRef) -> Goal:
@@ -90,11 +87,7 @@ goal/change 事件。以 resume 为例：
         return self._current
 ```
 
-为什么每个动词都要带引用、检查 revision？看两个并发场景：Agent A 拿着
-r3 的引用决定暂停，同时 Agent B 已经把目标推进到 r5。A 基于过期的状态做
-决定，pause 会覆盖 B 的进展。revision 守卫让基于旧状态的决策在提交时被
-响亮拒绝。官方文档第 20 行写明：变更以 GoalRef { id, revision } 作为比较
-并设置防护，并拒绝陈旧引用，同一个思想。
+为什么每个动词都要带引用、检查 revision？看两个并发场景：Agent A 拿着 r3 的引用决定暂停，同时 Agent B 已经把目标推进到 r5。A 基于过期的状态做决定，pause 会覆盖 B 的进展。revision 守卫让基于旧状态的决策在提交时被响亮拒绝。官方文档第 20 行写明：变更以 GoalRef { id, revision } 作为比较并设置防护，并拒绝陈旧引用，同一个思想。
 
 ## 13.3 事件溯源与严格回放
 
@@ -106,8 +99,7 @@ r3 的引用决定暂停，同时 Agent B 已经把目标推进到 r5。A 基于
         self._session.append("goal/change", _goal_to_dict(goal))
 ```
 
-`goal/change` 事件携带变更后的完整快照，官方第 24 行写明，于是目标状态
-与第 05 章的会话一样可回放：
+`goal/change` 事件携带变更后的完整快照，官方第 24 行写明，于是目标状态与第 05 章的会话一样可回放：
 
 ```python
     @classmethod
@@ -128,15 +120,11 @@ r3 的引用决定暂停，同时 Agent B 已经把目标推进到 r5。A 基于
         return store
 ```
 
-一个细节：revision 连续性只在同一目标内检查。每个新目标的 revision 从 1
-重新开始，demo 第 ③ 节里第一个目标走到 r7 完成后，第二个目标又从 r1
-开始，回放必须接受这个重置。
+一个细节：revision 连续性只在同一目标内检查。每个新目标的 revision 从 1 重新开始，demo 第 ③ 节里第一个目标走到 r7 完成后，第二个目标又从 r1 开始，回放必须接受这个重置。
 
 ## 13.4 Todo：整体替换式任务清单
 
-Goal 回答做到哪了、要不要继续，Todo 回答眼前这几步是什么。官方
-todo_write 工具的语义很特别：每次调用都整体替换，模型发来完整列表，
-不存在部分更新：
+Goal 回答做到哪了、要不要继续，Todo 回答眼前这几步是什么。官方 todo_write 工具的语义很特别：每次调用都整体替换，模型发来完整列表，不存在部分更新：
 
 ```python
 def todo_write(session: Session, items: list[TodoItem]) -> str:
@@ -150,14 +138,11 @@ def todo_write(session: Session, items: list[TodoItem]) -> str:
 
 三个设计意图：
 
-1. 整体替换让日志自洽。每个 `todo/write` 事件都是完整快照，回放时后写
-   覆盖先写，UI 与恢复永远拿到一致状态，不存在增删了一半的中间态。
-2. status 三值：pending、in_progress、completed，就三个。不加 blocked、
-   waiting，状态越多模型越容易写错。
-3. 严格校验：空 content、重复 content、非法 status 一律拒绝。错误信息
-   本身就是给模型的指导，模型下一轮会按提示修正。
+1. 整体替换让日志自洽。每个 `todo/write` 事件都是完整快照，回放时后写覆盖先写，UI 与恢复永远拿到一致状态，不存在增删了一半的中间态。
+2. status 三值：pending、in_progress、completed，就三个。不加 blocked、waiting，状态越多模型越容易写错。
+3. 严格校验：空 content、重复 content、非法 status 一律拒绝。错误信息本身就是给模型的指导，模型下一轮会按提示修正。
 
-## 13.5 跑一遍完整 demo
+## 13.5 运行完整示例
 
 ```bash
 uv run python chapters/13-goal-plan-todo/src/demo.py
@@ -204,9 +189,7 @@ uv run python chapters/13-goal-plan-todo/src/demo.py
   Error: invalid todos: 无效的 status: "doing"（只允许 pending/in_progress/completed）
 ```
 
-观察点：① 里每次动词 revision 都加一，block 的阻塞原因在 resume 后被
-清除；② 里拿着过期引用操作被响亮拒绝，防的是基于旧状态做决定；④ 的两条
-错误信息各教模型一件事，去重、改正状态值。
+观察点：① 里每次动词 revision 都加一，block 的阻塞原因在 resume 后被清除；② 里拿着过期引用操作被响亮拒绝，防的是基于旧状态做决定；④ 的两条错误信息各教模型一件事，去重、改正状态值。
 
 ## 本章小结
 
@@ -224,20 +207,11 @@ uv run python chapters/13-goal-plan-todo/src/demo.py
 | 同上，第 26 行 | `admit_round` | 官方只有来源为 goal 且已准入的 user/message 事件推进正数 Round，普通人类轮次绝不增加 roundsStarted；教学版简化为显式调用 |
 | [`packages/todo/tool-todo/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/todo/tool-todo/README.zh.md) | `todo_write` | 整体替换在第 5 行；todo/write 快照事件与后写覆盖在第 9 行；三值状态在第 11 行；拒绝空或重复 content 在第 25 行 |
 
-官方还有一块本章未展开：plan mode。修改文件前先出方案、经用户批准再动手
-的计划审查机制。它与 Goal 与 Todo 是不同维度，方案审查对进度管理，留作
-练习 4 的探索方向。
+官方还有一块本章未展开：plan mode。修改文件前先出方案、经用户批准再动手的计划审查机制。它与 Goal 与 Todo 是不同维度，方案审查对进度管理，留作练习 4 的探索方向。
 
 ## 练习
 
-1. **并发冲突推演。** 纸笔推演两个并发操作，A 拿 r3 引用 pause，B 先
-   admit_round 到 r4，列出所有交错顺序，确认每种顺序下 revision 守卫的
-   行为。
-2. **非法迁移。** 给 GoalStore 加非法迁移校验，比如 completed 之后不允许
-   pause，blocked 之后不允许 complete，对比官方 invariant 模块的做法，
-   它在候选事件进入持久日志前拒绝。
-3. **round 上限。** 把 max_rounds 设成 2，连续 admit_round 三次，观察
-   resume 的容量检查；讨论上限耗尽后官方要求人类做什么。
-4. **plan mode 探索。** 阅读官方 plan-mode 文档，设计一个简化的改文件前
-   先出方案、用户批准后才执行写工具的机制，写出接口草图并说明与 Goal
-   与 Todo 的关系。
+1. **并发冲突推演。** 纸笔推演两个并发操作，A 拿 r3 引用 pause，B 先 admit_round 到 r4，列出所有交错顺序，确认每种顺序下 revision 守卫的行为。
+2. **非法迁移。** 给 GoalStore 加非法迁移校验，比如 completed 之后不允许 pause，blocked 之后不允许 complete，对比官方 invariant 模块的做法，它在候选事件进入持久日志前拒绝。
+3. **round 上限。** 把 max_rounds 设成 2，连续 admit_round 三次，观察 resume 的容量检查；讨论上限耗尽后官方要求人类做什么。
+4. **plan mode 探索。** 阅读官方 plan-mode 文档，设计一个简化的改文件前先出方案、用户批准后才执行写工具的机制，写出接口草图并说明与 Goal 与 Todo 的关系。

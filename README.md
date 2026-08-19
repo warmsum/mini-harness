@@ -2,15 +2,14 @@
   <img src="docs/images/logo.svg" alt="mini-harness" width="480">
 </p>
 
-<p align="center"><b>用 Python 理解 DeepSeek Harness 如何驱动一个 Agent</b></p>
+<p align="center"><b>用 Python 从一次模型调用开始，逐步构建 DeepSeek Harness 的核心运行机制</b></p>
 <p align="center">
   <a href="README_EN.md">English</a>
 </p>
 
 <div align="center">
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB.svg)](pyproject.toml)
 
 </div>
 
@@ -18,30 +17,45 @@
 
 ## 项目介绍
 
-DeepSeek Harness（简称 DSH）是一个 TypeScript 写的 Agent 框架，官方仓库有
-上百个包。它把插件、作用域、事件日志、工具管线和上下文工程这些概念组织得很紧凑，但对习惯了 Python 的开发者来说，读源码之前还得先熟悉 TypeScript，
-学习成本不小。
+调用一次大语言模型并不复杂：发送消息，等待回复，再把文本显示出来。真正让 Agent 能够持续完成任务，还需要处理另一组问题。模型如何调用工具？多轮对话如何保存？上下文越来越长时怎样压缩？文件和命令怎样限制权限？任务执行到一半时，新的用户消息又该如何进入当前流程？
 
-这个项目把 DSH 的核心机制用 Python 3.11+ 重新实现了一遍，做成 17 个可以
-独立运行的章节。课程覆盖 DSH 的 headless 运行路径，也就是不打开网页、不挂终端界面，直接把任务交给 Agent，等它完成后取回结果。
+[DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness)（简称 DSH）围绕这些问题建立了一套完整的 Agent 运行系统。它使用 TypeScript 编写，代码分布在上百个包中。对于主要使用 Python 的学习者，直接进入这套 monorepo，往往需要同时理解语言语法、工程结构和 Agent 机制，学习重点很容易被分散。
 
-学完全部章节，会从零实现这些东西：
+mini-harness 将 DSH 的核心机制拆成 17 个 Python 章节。课程从最小的流式模型调用开始，依次加入工具、会话、提示词、持久化、上下文压缩、文件与命令能力、技能、子 agent 和外部搜索，最后组装成一个能够接收任务、保存会话并返回结果的完整 Agent。
 
-- 模型流式输出、消息协议和工具调用往返；
-- 一个会等待依赖、能自动清理资源的插件系统；
-- 可以追溯、压缩、恢复的对话日志；
-- 默认只读的文件与命令工具，以及可开关的外部能力；
-- 一个能保存会话、返回最终文本的完整 Agent。
+课程主要讲解 DSH 的 headless 运行路径。这里的 headless 指不启动网页、桌面界面或 HTTP 服务，程序直接接收任务，运行 Agent 和工具，完成后从标准输出返回结果。这条路径保留了 Agent 的核心运行过程，也便于在终端中观察每一步发生了什么。
 
-其中 9 章会调用真实的 DeepSeek 模型（01、02、05、06、07、09、14、15、
-17），第 15 章还会做真实的网页搜索和抓取；其余 8 章只跑本地机制，不需要
-API Key。每一章的代码都是自包含的，不依赖任何外部包，教程正文里给出了
-完整实现和逐段讲解。
+完成全部章节后，将能够解释并实现以下机制：
+
+- 流式响应如何从数据分片组装成一条完整消息；
+- 模型如何提出工具调用，程序如何执行工具并把结果送回模型；
+- 会话事件如何记录、投影、持久化、恢复和压缩；
+- 插件、服务与依赖如何启动，并在卸载时按顺序清理资源；
+- 文件、Shell、技能、Goal、Todo 和子 agent 如何接入运行循环；
+- 一个 headless Agent 如何完成配置、执行、落盘和结果结算。
+
+## 适合哪些读者
+
+这套课程面向具备 Python 基础、希望理解 Agent 内部运行方式的开发者和自学者。开始学习前，只需要能够阅读函数、类、字典和异常处理，并了解通过 API 调用大语言模型的基本概念。课程不要求 TypeScript 经验，也不要求提前掌握 Agent 框架、事件溯源或上下文工程。
+
+代码中会反复出现 `async / await`、`dataclass`、生成器和 JSON 序列化。相关概念会在第一次使用时结合当前问题讲解，因此无需先单独学习一套完整的异步编程或类型系统课程。
 
 ## 快速开始
 
-项目用 [uv](https://docs.astral.sh/uv/) 管理依赖，需要 Python 3.11 以上。
-在仓库根目录执行：
+项目使用 [uv](https://docs.astral.sh/uv/) 管理 Python 环境和依赖，需要 Python 3.11 或更高版本。
+
+### 运行本地章节
+
+第 03、04、08、10、11、12、13、16 章只演示本地机制，不访问模型，也不需要 API Key。下面的命令会安装依赖并运行这 8 章：
+
+```bash
+uv sync
+uv run python scripts/run_all.py --local-only
+```
+
+### 从第 01 章开始学习
+
+第 01 章会连接 DeepSeek API，先从模板创建本地配置：
 
 ```bash
 cp .env.example .env
@@ -50,164 +64,194 @@ uv sync
 uv run python chapters/01-streaming-agent/src/demo.py
 ```
 
-`.env` 已被 Git 忽略，不会被提交。运行全部章节：
+`.env` 已加入 Git 忽略规则。联网章节按照“进程环境变量优先、项目根目录 `.env` 作为本地回退”的顺序读取 `DEEPSEEK_API_KEY`。`DEEPSEEK_BASE_URL`、`DSH_MODEL` 等启动级变量应通过终端环境设置，官方 DSH 启动器会拒绝从 `.env` 读取这类配置。
+
+全部章节可以通过一条命令运行，其中 9 章会访问 DeepSeek API 并产生模型用量：
 
 ```bash
-uv run python scripts/run_all.py              # 全部 17 章，其中 9 章联网产生用量
-uv run python scripts/run_all.py --local-only # 只跑 8 个本地章节
+uv run python scripts/run_all.py
 ```
 
-17 个章节只会读取 `DEEPSEEK_API_KEY` 这一个环境变量。`DEEPSEEK_BASE_URL`、
-`DSH_MODEL` 这类启动级变量不要写进 `.env`，官方 DSH 启动器会拒绝从文件
-读取它们，报错提示改用 `export`。
+## 课程如何组织
 
-## 学习路径
+17 个章节分为五个部分。每一部分先建立一个可以运行的基础，再围绕前一部分留下的问题增加新的机制。
 
-每章的结构都一样：先讲这个机制解决什么问题，再给出完整代码和逐段讲解，
-然后是真实运行输出、官方源码对照和练习。建议按顺序学习，只想快速浏览的
-话先跑 01、02、09、17 这四章。async、dataclass 这些 Python 概念会在用到
-的时候随章讲解，不需要提前准备。
+### 第一部分：建立最小 Agent
 
-| 阶段 | 章节 | 学完能回答什么问题 |
+这一部分从模型请求与响应开始。完成两章后，程序已经能够接收任务、读取流式输出，并在模型需要时执行计算工具。
+
+| 章节 | 核心问题 | 运行方式 |
 |---|---|---|
-| 最小闭环 | [01 流式 Agent](chapters/01-streaming-agent/README.md)（调模型）· [02 工具调用](chapters/02-tool-calling/README.md)（调模型） | 模型的流式增量怎么变成稳定消息，工具调用如何完成往返 |
-| 插件底座 | [03 迷你插件系统](chapters/03-python-cordis/README.md)（本地）· [04 服务与依赖](chapters/04-services-scopes/README.md)（本地） | 插件怎么等待依赖自动启动，卸载时怎么级联清理，读服务为什么必须声明 |
-| 状态与执行 | [05 会话日志](chapters/05-session-log/README.md)（调模型）· [06 请求 envelope](chapters/06-prompt-tools/README.md)（调模型）· [07 常驻 Agent](chapters/07-agent-inbox/README.md)（调模型）· [08 持久化](chapters/08-persistence/README.md)（本地） | 事件溯源、提示词组装、轮次边界、原子落盘和崩溃恢复如何配合 |
-| 上下文工程 | [09 计量与压缩](chapters/09-context-engineering/README.md)（调模型） | 4 字符每 token 的估算、80% 阈值和摘要替换各自解决什么问题 |
-| 本地能力 | [10 文件系统](chapters/10-filesystem/README.md)（本地）· [11 Shell 与审批](chapters/11-shell-sandbox/README.md)（本地）· [12 Skills](chapters/12-instructions-skills/README.md)（本地） | 路径围栏、读后写检查、命令审批链和按需加载指令如何工作 |
-| 编排与扩展 | [13 Goal 与 Todo](chapters/13-goal-plan-todo/README.md)（本地）· [14 Subagent](chapters/14-subagents-workflow/README.md)（调模型）· [15 外部能力](chapters/15-external-capabilities/README.md)（调模型） | 长任务状态机、子 agent 的隔离与并行、真实网页搜索如何组织 |
-| 装配 | [16 配置与 RPC](chapters/16-settings-jsonrpc/README.md)（本地）· [17 收口组装](chapters/17-headless-capstone/README.md)（调模型） | 配置分层、JSON-RPC 线格式，以及前 16 章如何组装成可运行的整体 |
+| [01｜流式输出与消息组装](chapters/01-streaming-agent/README.md) | SSE 返回的是连续分片，程序如何把它们组装成稳定消息？ | DeepSeek API |
+| [02｜工具调用](chapters/02-tool-calling/README.md) | 模型如何发起工具调用，工具结果又如何进入下一次模型请求？ | DeepSeek API |
 
-## 17 章如何衔接
+### 第二部分：理解插件与依赖
 
-一次任务从进来到出去，走过的路径是这样的：
+Agent 的能力会不断增加。插件系统负责组织这些能力的安装、依赖和清理，使各模块能够按照明确的生命周期协作。
+
+| 章节 | 核心问题 | 运行方式 |
+|---|---|---|
+| [03｜迷你插件系统](chapters/03-python-cordis/README.md) | 插件如何等待依赖、进入运行状态，并在卸载时释放资源？ | 本地 |
+| [04｜服务与依赖](chapters/04-services-scopes/README.md) | 服务如何注册、遮蔽和重新解析，严格访问为什么能够暴露依赖错误？ | 本地 |
+
+### 第三部分：建立持续运行的 Agent
+
+一次模型调用只处理一个请求，持续运行的 Agent 还需要记录历史、接收后续消息、恢复会话，并在上下文接近上限时压缩旧内容。
+
+| 章节 | 核心问题 | 运行方式 |
+|---|---|---|
+| [05｜会话日志](chapters/05-session-log/README.md) | append-only 事件如何还原对话消息，并保留每次运行的过程？ | DeepSeek API |
+| [06｜请求 envelope 组装](chapters/06-prompt-tools/README.md) | System Prompt、历史消息和工具 schema 如何组成一次模型请求？ | DeepSeek API |
+| [07｜常驻 Agent 与 inbox](chapters/07-agent-inbox/README.md) | followup、steer 和 inject 如何进入正在运行的 turn 与 step？ | DeepSeek API |
+| [08｜会话持久化](chapters/08-persistence/README.md) | JSONL 日志如何安全写入，并在进程重启后恢复？ | 本地 |
+| [09｜上下文工程](chapters/09-context-engineering/README.md) | 程序如何估算 token 压力，并用摘要替换较早的历史？ | DeepSeek API |
+
+### 第四部分：扩展 Agent 的能力
+
+运行循环建立后，Agent 开始与本地环境和外部服务交互。这一部分分别处理文件、命令、技能、长期任务状态、子 agent 和网络搜索。
+
+| 章节 | 核心问题 | 运行方式 |
+|---|---|---|
+| [10｜文件系统](chapters/10-filesystem/README.md) | 路径围栏、读后写检查和观察记录如何降低文件误操作风险？ | 本地 |
+| [11｜命令执行与审批](chapters/11-shell-sandbox/README.md) | Shell 命令如何经过权限判断、审批、超时和结果回收？ | 本地 |
+| [12｜技能与按需加载](chapters/12-instructions-skills/README.md) | 技能目录如何只暴露摘要，并在使用时加载完整指令？ | 本地 |
+| [13｜Goal 与 Todo](chapters/13-goal-plan-todo/README.md) | 长任务如何保存目标 revision 和任务清单快照？ | 本地 |
+| [14｜Subagent 委派](chapters/14-subagents-workflow/README.md) | 子 agent 如何获得独立上下文，并把部分结果或最终结果返回父任务？ | DeepSeek API |
+| [15｜网络搜索与网页抓取](chapters/15-external-capabilities/README.md) | Agent 如何使用 DeepSeek Web Search，并将搜索结果转成可引用的上下文？ | DeepSeek API + Web Search |
+
+### 第五部分：组装完整运行入口
+
+最后两章处理系统边界。配置和 RPC 负责接收外部请求，headless 入口则把前面的机制组织成一次完整运行。
+
+| 章节 | 核心问题 | 运行方式 |
+|---|---|---|
+| [16｜配置与 RPC](chapters/16-settings-jsonrpc/README.md) | 分层配置如何结算，JSON-RPC 如何校验并分发外部请求？ | 本地 |
+| [17｜headless 组装](chapters/17-headless-capstone/README.md) | 配置、Agent、会话持久化和结果结算如何形成一个命令行程序？ | DeepSeek API |
+
+## 一次任务如何完成
+
+第 01、02、05、06、07、08、09、17 章组成 Agent 的主要运行路径。下面以一次普通任务为例，展示各章之间的关系：
 
 ```mermaid
 flowchart TB
-    TASK[任务文本] --> INBOX[第07章 inbox<br>followup / steer]
-    INBOX --> LOOP[第07章 常驻循环<br>turn / step 边界]
-    LOOP --> ENV[第06章 请求 envelope<br>提示词组装 + 工具清单]
-    ENV --> CALL[第01/02章 模型调用<br>流式 / 工具往返]
-    CALL -->|tool_calls| TOOLS[第02章 工具执行]
-    TOOLS -->|结果回灌| LOOP
-    LOOP --> LOG[第05章 事件日志<br>append-only + 投影]
-    LOG --> METER[第09章 token 计量<br>4字符/token 启发式]
-    METER -->|压力 > 80%| COMPACT[第09章 压缩<br>摘要替换 + KV cache]
+    TASK[用户任务] --> INBOX[第 07 章 inbox<br>接收 followup / steer]
+    INBOX --> LOOP[第 07 章 Agent 循环<br>划分 turn / step]
+    LOOP --> ENV[第 06 章请求 envelope<br>组装提示词、历史与工具]
+    ENV --> CALL[第 01、02 章模型调用<br>接收流式文本或工具请求]
+    CALL -->|tool_calls| TOOLS[第 02 章执行工具]
+    TOOLS -->|工具结果| LOOP
+    LOOP --> LOG[第 05 章会话日志<br>追加事件并投影消息]
+    LOG --> METER[第 09 章 token 计量]
+    METER -->|超过阈值| COMPACT[第 09 章压缩<br>用摘要替换较早历史]
     COMPACT --> LOG
-    LOG --> PERSIST[第08章 持久化<br>JSONL 原子发布]
-    PERSIST --> OUT[第17章 stdout + 退出码]
+    LOG --> PERSIST[第 08 章持久化<br>写入 JSONL]
+    PERSIST --> OUT[第 17 章结果结算<br>stdout 与退出码]
 ```
 
-第 03、04 章的插件系统和第 10、11 章的沙箱与审批不在这条路径上，它们是
-独立的能力，任何章节需要时都能接入。第 12 到 16 章各自覆盖一块独立主题：
-Skills、Goal 与 Todo、Subagent、外部搜索、配置与 RPC。
+第 03、04 章提供插件和依赖管理，第 10、11 章约束本地操作，第 12 到 16 章增加可选能力。这些机制可以围绕主要运行路径独立学习，也能在完整系统中按需接入。
 
-阅读顺序上，01、02、05、06、07、08、09、17 是连续的，每章在前一章的
-代码基础上增加一个机制；其余章节可以按兴趣单独学习。
+## 每章的学习方式
 
-课程没有覆盖的部分包括内核级 shell 沙箱、流式工具分片组装、fork 子 agent
-和压缩前的剪枝，它们在第 02、09、14 章的练习里作为延伸题目出现，并给出
-了对应的官方源码位置。
+每章都围绕一个具体问题展开，正文依次包含问题背景、运行过程、完整代码、分段讲解、真实输出、官方源码对照和练习。章节中的 `src/` 目录保存当前章节的完整实现，不会从一个共享教学包中导入已经写好的核心逻辑，因此代码可以与正文逐段对应。
 
-## 官方源码对照
+完整学习按 01 到 17 章推进。若只想先了解课程的实现深度，可以依次阅读 01、02、09、17：第 01 章建立模型连接，第 02 章形成 Agent 的最小闭环，第 09 章处理长上下文，第 17 章展示最终组装。
 
-每个机制都能在官方源码里找到对应物，每章末尾的对照小节是分章视图。所有
-链接固定到 [`master@47f943859bef60e4160492346772ded9b24f765a`](https://github.com/deepseek-ai/DeepSeek-Harness/tree/47f943859bef60e4160492346772ded9b24f765a)
-（下文以 `@SHA` 简写）：
+一次章节学习可以按下面的顺序进行：
 
-| 章 | 教学版机制 | 官方路径（前缀 `https://github.com/deepseek-ai/DeepSeek-Harness/blob/@SHA/`） | 关键行号 |
-|----|-----------|--------------------------------------------------------------------------------|----------|
+1. 先阅读开头的问题背景，明确本章为什么需要新增这个机制。
+2. 运行 `src/demo.py`，观察输入、事件和输出之间的关系。
+3. 对照正文阅读完整代码，重点跟踪数据结构在各函数之间如何流动。
+4. 打开章末的官方源码链接，比较 TypeScript 实现与 Python 表达的差异。
+5. 完成练习，将当前实现扩展到新的场景或失败路径。
+
+## TypeScript 与 Python 的对应
+
+课程对齐的是 DSH 的行为、数据流和生命周期。TypeScript 与 Python 的语言机制不同，因此代码采用 Python 中更直接的表达方式：
+
+| DSH / TypeScript | mini-harness / Python | 对应关系 |
+|---|---|---|
+| Proxy 拦截属性读取 | `__getattr__` | 在读取未声明服务时立即报告错误 |
+| fiber 状态机与级联清理 | `PluginHandle` 状态机与逆序清理 | 保留插件启动、运行、失败和卸载生命周期 |
+| epoch 依赖重算与 notify | 依赖签名与全量重算 | 服务变化后重新判断插件是否可以启动 |
+| waterfall 事件 | 递归 `waterfall` dispatch | 前一个处理结果成为下一个处理输入 |
+| Promise 并发 | `ThreadPoolExecutor` | 多个子 agent 并发运行，结果按任务归集 |
+| discriminated union | frozen dataclass 联合 | 用明确类型表示不同消息和事件 |
+| JSON 快照冻结 | 递归校验与冻结 | 日志只接受能够稳定序列化和重放的数据 |
+
+## 官方源码依据
+
+课程中的机制和术语均对照 DeepSeek Harness 官方源码。链接固定到提交 [`47f943859bef60e4160492346772ded9b24f765a`](https://github.com/deepseek-ai/DeepSeek-Harness/tree/47f943859bef60e4160492346772ded9b24f765a)，避免上游代码更新后出现路径和行号漂移。每章末尾提供与当前主题直接相关的源码链接、关键行号和 Python 等价实现说明。
+
+固定提交中的 monorepo 包版本为 `0.1.0-rc.5`，同期 npm 发布包为 `0.1.0-rc.6`。课程以固定提交的 Git 源码为技术依据。
+
+<details>
+<summary><strong>查看 17 章官方源码对照表</strong></summary>
+
+| 章 | 教学版机制 | 官方路径（前缀 `https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/`） | 关键行号 |
+|---|---|---|---|
 | 01 | SSE 流式 | `packages/llm/llm-deepseek/src/adapter.ts` | 286（text/event-stream） |
 | 01 | 分片组装 | `packages/llm/llm/src/assembler.ts` | 60-63（text-delta） |
 | 02 | 工具调用往返 | `packages/core/agent-loop/README.zh.md` | 105（工具调用与结果回灌） |
 | 02 | 工具注册 | `packages/core/tools/README.zh.md` | 5（流水线）、20（register） |
 | 03 | 插件生命周期 | `vendor/cordis/src/fiber.ts` | 184（Fiber）、148（状态机）、415（effect） |
-| 03 | Context/Proxy | `vendor/cordis/src/context.ts` | 74（Proxy） |
+| 03 | Context / Proxy | `vendor/cordis/src/context.ts` | 74（Proxy） |
 | 04 | 服务与依赖 | `vendor/cordis/src/reflect.ts` | 277（provide）、314（notify）、144（严格访问） |
 | 04 | waterfall 事件 | `vendor/cordis/src/events.ts` | 234-238 |
 | 05 | 事件溯源 | `packages/core/session/README.zh.md` | 5（仅追加）、39（append）、40-41（投影） |
-| 05 | 轮次消息记录 | `packages/core/agent-loop/README.zh.md` | 105（仅写日志与发送的区分） |
+| 05 | 轮次消息记录 | `packages/core/agent-loop/README.zh.md` | 105（日志记录与模型消息的区别） |
 | 06 | 提示词组装 | `packages/core/system-prompt/README.zh.md` | 5（组装注册表）、20（section）、24（variable） |
 | 06 | schema 投影 | `packages/core/tools/README.zh.md` | 24（schemas 不含 execute） |
-| 07 | inbox 与 send | `packages/core/agent-loop/README.zh.md` | 58（followup/steer/inject）、76（循环只做三件事） |
+| 07 | inbox 与 send | `packages/core/agent-loop/README.zh.md` | 58（followup / steer / inject）、76（循环职责） |
 | 08 | JSONL 后端 | `packages/session/session-persistence-jsonl/README.zh.md` | 5（仅追加）、43（原子发布）、44（失败回滚） |
 | 09 | token 估算 | `packages/llm/token-meter/README.zh.md` | 9（4 字符/token）、32（projectedTokens） |
-| 09 | 压缩策略 | `packages/compaction/compaction-basic/README.zh.md` | 32（0.8/0.16）、18（KV cache 复用）、17（收敛）、164（失败保留原文） |
-| 10 | 文件沙箱 | `packages/fs/fs-sandbox/README.zh.md` | 16（可写根）、21（约束非边界）、23（结构化拒绝） |
-| 11 | 命令沙箱 | `packages/shell/bash-sandbox/README.zh.md` | 15（danger-full-access）、85（只覆盖文件影响） |
-| 11 | 审批 | `packages/interaction/user-approval/README.zh.md` | 四结果、fail closed |
+| 09 | 压缩策略 | `packages/compaction/compaction-basic/README.zh.md` | 32（0.8 / 0.16）、18（KV cache）、17（收敛）、164（失败保留原文） |
+| 10 | 文件沙箱 | `packages/fs/fs-sandbox/README.zh.md` | 16（可写根）、21（约束范围）、23（结构化拒绝） |
+| 11 | 命令沙箱 | `packages/shell/bash-sandbox/README.zh.md` | 15（danger-full-access）、85（文件影响范围） |
+| 11 | 审批 | `packages/interaction/user-approval/README.zh.md` | 四种结果、fail closed |
 | 12 | 技能 | `packages/skill/skill/README.zh.md` | 17（摘要目录）、56（渐进加载）、44（renderSkillContent） |
 | 13 | 目标状态机 | `packages/goal/goal/README.zh.md` | 5（事件溯源）、22（单一目标）、24（goal/change）、28（续行不持久化） |
 | 13 | 任务清单 | `packages/todo/tool-todo/README.zh.md` | 5（整体替换）、9（快照事件）、25（校验） |
 | 14 | 子 agent | `packages/subagent/tool-subagent/README.zh.md` | 5（委派工具）、11（失败保留部分文本） |
-| 14 | fork 例外 | `packages/subagent/subagent-fork-in-process/README.zh.md` | 5（继承父对话种子） |
-| 15 | Web Search | `packages/web/web-search-deepseek/README.zh.md` | Anthropic 端点 + 服务器工具 + 严格模式 |
-| 16 | RPC 网关 | `packages/api/gateway/README.zh.md` | 5（Host/Client 端点）、9（invoke 校验） |
+| 14 | fork | `packages/subagent/subagent-fork-in-process/README.zh.md` | 5（继承父对话种子） |
+| 15 | Web Search | `packages/web/web-search-deepseek/README.zh.md` | Anthropic 端点、服务器工具与严格模式 |
+| 16 | RPC 网关 | `packages/api/gateway/README.zh.md` | 5（Host / Client 端点）、9（invoke 校验） |
 | 17 | headless 组合 | `packages/bundle/headless/README.zh.md` | 5（不挂载 Host）、7（runner 语义） |
 
-固定提交的 monorepo 包版本是 `0.1.0-rc.5`，同期 npm 发布包为
-`0.1.0-rc.6`，本表按 Git 源码版本记录。
-
-## TypeScript 与 Python 的对应
-
-教学版对齐的是行为与生命周期，不要求模仿 TypeScript 语法：
-
-| DSH / TypeScript | mini-harness / Python |
-|---|---|
-| Proxy 拦截属性读取 | `__getattr__` 严格服务访问 |
-| fiber 状态机 + 级联清理 | `PluginHandle` 状态机 + 逆序清理 |
-| epoch 依赖重算 + notify | 依赖签名（uid:version）+ 全量重算 |
-| waterfall 事件 | 递归 dispatch 的 `waterfall` |
-| Promise 并发 | `ThreadPoolExecutor` 并行子 agent |
-| discriminated union + frozen | frozen dataclass 联合 |
-| JSON 快照冻结 | 递归冻结，拒绝非纯 JSON |
-
-## 会反复用到的 Python 概念
-
-章节里会在用到时讲解，这里列一份总览：
-
-- **frozen dataclass**：创建后不可修改的数据对象。对话历史会被反复读取，
-  任何一处悄悄改动都会让后续行为对不上，用语言约束直接消灭这类问题。
-- **async / await**：网络等待期间让程序处理别的事情。记住三个要点，
-  `async def` 定义异步函数，`await` 等待结果，`asyncio.run` 启动。
-- **生成器（yield）**：函数里出现 `yield` 就变成生成器，每产出一个值就
-  交给调用方，然后暂停等待下一次迭代，这是流式消费的天然形态。
-- **错误作为信息**：工具失败、文件被外部修改、审批被拒绝，都转成结构化
-  文本回灌给模型，而不是让程序崩溃。Agent 的健壮性来自让模型看见错误。
-- **冻结与严格 JSON**：日志和消息只接受纯 JSON，拒绝 NaN、集合和循环
-  引用，写入时冻结，这是持久化与重放的前提。
+</details>
 
 ## 仓库结构
 
 ```text
 mini-harness/
-├── chapters/              # 17 章：每章 = 教程正文 README + 自包含 src/ 代码
+├── chapters/
 │   ├── 01-streaming-agent/
-│   │   ├── README.md      # 原理 → 完整代码 → 逐段讲解 → 真实输出 → 官方对照 → 练习
-│   │   └── src/           # 本章实现（零外部依赖）+ demo.py
-│   └── ...
-├── scripts/run_all.py     # 运行全部章节 demo
-├── docs/images/logo.svg   # 门面图
+│   │   ├── README.md      # 问题、原理、完整代码、输出、源码对照与练习
+│   │   └── src/           # 当前章节的完整实现和 demo.py
+│   ├── ...
+│   └── 17-headless-capstone/
+├── scripts/run_all.py     # 发现并运行 17 个章节 demo
+├── docs/images/logo.svg
+├── .env.example
 └── pyproject.toml
 ```
 
-## 扩展路线
-
-- 压缩前的剪枝，第 09 章练习 3 预留了实现位置
-- fork 子 agent，第 14 章练习 3 预留了实现位置
-- workflow 脚本编排，第 14 章练习 4 预留了实现位置
-- MCP 客户端与协议适配
-- Code Mode，把工具折叠成 run_code
-- 流式工具分片组装，第 02 章练习 4 预留了实现位置
-
 ## 安全边界
 
-默认权限是 read-only，写操作和 Shell 需要显式升级或审批；文件路径先规范化
-再检查围栏；命令执行带超时和一次性授权。这些措施用来降低学习和本地实验
-中的误操作风险。Python 子进程仍拥有当前用户的系统权限，路径围栏不是
-操作系统级沙箱，官方也明确过同样的边界。项目不提供图形界面、HTTP 服务、
-热重载和云端沙箱。
+涉及文件和命令的章节默认使用 read-only 权限。写操作和 Shell 需要显式授权或审批，文件路径会先规范化再检查允许范围，命令执行带有超时和结果回收。这些机制用于减少学习和本地实验中的误操作。
+
+路径围栏仍运行在普通 Python 进程中，不能替代操作系统级沙箱。子进程拥有当前用户已经具备的系统权限。课程也没有实现图形界面、HTTP 服务、热重载和云端隔离环境，这些能力不影响 headless 运行路径的学习。
+
+## 后续学习方向
+
+完成 17 章后，可以沿着以下方向继续扩展：
+
+- 在第 09 章加入压缩前的工具结果剪枝；
+- 在第 14 章实现 fork 子 agent 与 workflow 脚本编排；
+- 接入 MCP 客户端，将外部服务动态注册为工具；
+- 实现 Code Mode，把多个工具接口折叠成一个代码执行入口；
+- 在第 02 章补充流式工具参数分片的增量组装；
+- 对照 DSH 的 Web、Host 和平台沙箱，研究 headless 路径之外的系统组成。
 
 ## 许可
 
-MIT License，第三方归属见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+项目采用 MIT License，第三方源码与许可信息见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
