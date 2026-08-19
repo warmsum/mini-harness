@@ -128,11 +128,17 @@ class PluginHandle:
         try:
             result = self._plugin(self._ctx, self.config)
             if result is not None:
-                self._disposers.append(result)
+                self.collect(_once(result))
             self.state = "active"
         except Exception as error:
             self.state = "failed"
             self._error = error
+            try:
+                self._dispose_all()
+            except Exception as cleanup_error:
+                raise ExceptionGroup(
+                    "插件安装失败，回滚清理也失败", [error, cleanup_error]
+                ) from None
             raise
         finally:
             self._ctx._current = previous
@@ -141,8 +147,8 @@ class PluginHandle:
 三个要点：
 
 1. `_current` 的切换与恢复。执行插件函数前把 `_current` 指向自己，执行后恢复成上一个。于是插件函数内部的任何注册都知道记到谁名下。`try/finally` 保证即使插件抛错，`_current` 也一定恢复，否则环境会一直以为还有插件在安装。
-2. 插件函数返回的清理函数。插件本体可以返回一个函数作为自己的收尾动作，构造器把它收进清单。
-3. 安装失败时立即抛出异常。句柄先标记为 `failed`，再把原异常继续抛给调用方，避免静默留下半初始化状态。
+2. 插件函数返回的清理函数。插件本体可以返回一个函数作为自己的收尾动作，`_once` 保证手动清理和插件卸载不会把它执行两遍。
+3. 安装失败先回滚。插件在抛错前可能已经注册监听器或子插件，必须逆序清掉，再把原异常抛给调用方；若安装与回滚都失败，`ExceptionGroup` 会保留两边的诊断。
 
 卸载的实现同样简单，逆序执行清单：
 
@@ -150,13 +156,23 @@ class PluginHandle:
     def dispose(self) -> None:
         if self.state == "disposed":
             return
-        for disposer in reversed(self._disposers):
-            disposer()
-        self._disposers.clear()
+        self._dispose_all()
         self.state = "disposed"
+
+    def _dispose_all(self) -> None:
+        disposers = list(reversed(self._disposers))
+        self._disposers.clear()
+        errors = []
+        for disposer in disposers:
+            try:
+                disposer()
+            except Exception as error:
+                errors.append(error)
+        if errors:
+            raise ExceptionGroup("插件资源清理失败", errors)
 ```
 
-注意 `reversed`：后注册的资源先清理。这个顺序不是随便选的，资源之间常常有依赖，先打开文件再启动读文件的任务，销毁时倒过来拆才安全，就像搭积木要先拆最上面那块。另外 `disposed` 状态有守卫，重复卸载是空操作，保证清理函数最多执行一次。
+注意 `reversed`：后注册的资源先清理。这个顺序不是随便选的，资源之间常常有依赖，先打开文件再启动读文件的任务，销毁时倒过来拆才安全，就像搭积木要先拆最上面那块。某个清理函数抛错时，剩余资源仍会继续清理，最后再统一抛出错误。清单在执行前已经清空，加上 single-shot 包装，重复卸载或手动解绑不会重复释放资源。
 
 ## 3.4 effect：把资源与清理绑在一起
 
@@ -164,7 +180,8 @@ class PluginHandle:
 
 ```python
     def effect(self, fn: Callable[[], Disposer | None]) -> Disposer:
-        disposer = fn()
+        raw_disposer = fn()
+        disposer = _once(raw_disposer) if raw_disposer is not None else None
         if disposer is not None and self._current is not None:
             self._current.collect(disposer)
         return disposer if disposer is not None else (lambda: None)
@@ -193,9 +210,12 @@ ctx.effect(lambda: stop_task)
     def on(self, event: str, listener: Callable[..., Any]) -> Disposer:
         self._listeners.setdefault(event, []).append(listener)
 
-        def remove() -> None:
-            self._listeners[event].remove(listener)
+        def remove_listener() -> None:
+            listeners = self._listeners.get(event)
+            if listeners is not None and listener in listeners:
+                listeners.remove(listener)
 
+        remove = _once(remove_listener)
         if self._current is not None:
             self._current.collect(remove)
         return remove
@@ -299,10 +319,10 @@ uv run python chapters/03-python-cordis/src/demo.py
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`vendor/cordis/src/context.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/vendor/cordis/src/context.ts) | `Context` | 官方 Context 是一个 Proxy，第 74 行，读 `ctx.xxx` 会走服务查找。第 04 章用 Python 的 `__getattr__` 实现同样效果 |
-| [`vendor/cordis/src/fiber.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/vendor/cordis/src/fiber.ts) | `PluginHandle` | 官方把插件句柄叫 fiber，第 184 行，状态机比我们多两个中间态，第 148 行 |
-| 同上 | `effect` | 官方 effect 同样立即执行、收集返回的清理，第 415 行，且支持异步清理与错误隔离 |
-| [`vendor/cordis/src/reflect.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/vendor/cordis/src/reflect.ts) | 第 04 章 | 官方读未声明的服务直接报错，第 144 行，依赖显式化，第 04 章对齐 |
+| [`vendor/cordis/src/context.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/vendor/cordis/src/context.ts) | `Context` | 官方 Context 是 Proxy，服务属性读取会进入反射层；第 04 章用 Python `__getattr__` 表达同一约束 |
+| [`vendor/cordis/src/fiber.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/vendor/cordis/src/fiber.ts) | `PluginHandle` | 官方把插件句柄叫 fiber，拥有更完整的安装、依赖与卸载状态机 |
+| 同上 | `effect` | 官方 effect 同样立即执行并收集清理函数，还支持异步清理与更完整的错误隔离 |
+| [`vendor/cordis/src/reflect.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/vendor/cordis/src/reflect.ts) | 第 04 章 | 官方拒绝读取未声明的服务，第 04 章对齐这一依赖显式化规则 |
 
 没有实现的部分包括官方的热重载、配置 schema 校验、异步 effect 等工程能力，它们不在教学范围里。核心的依赖注入与服务作用域正是下一章的内容。
 

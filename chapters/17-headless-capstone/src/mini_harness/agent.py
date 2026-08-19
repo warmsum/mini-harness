@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 
-from .client import DeepSeekClient, Message
+from .client import DeepSeekClient, Message, Tool
 from .inbox import Inbox
 from .prompt import PromptAssembler
 from .registry import ToolRegistry
@@ -35,6 +35,7 @@ class Agent:
         self._inbox = Inbox()
         self._session = Session()
         self._turn_no = 0
+        self._request_header: str | None = None
 
     # ------------------------------------------------------------------
     # 外部入口：投递消息
@@ -63,63 +64,108 @@ class Agent:
         tools_by_name = {tool.name: tool for tool in tools}
 
         while self._inbox.pending > 0 and self._turn_no < max_turns:
-            message = self._inbox.claim_turn()
-            if message is None:
+            claimed = self._inbox.claim_turn()
+            if not claimed:
                 break
             self._turn_no += 1
             self._session.append("turn/start", {"turn": self._turn_no})
-            self._session.append("user/message", {"content": message.content})
-            self._run_turn(tools, tools_by_name)
-            self._session.append(
-                "turn/end", {"turn": self._turn_no, "reason": "completed"}
-            )
+            try:
+                self._run_turn(tools, tools_by_name, claimed)
+            except Exception as error:
+                self._session.append(
+                    "turn/end",
+                    {"turn": self._turn_no, "reason": "error", "message": str(error)},
+                )
+                raise
+            else:
+                self._session.append(
+                    "turn/end", {"turn": self._turn_no, "reason": "completed"}
+                )
         return self._session
 
-    def _run_turn(self, tools: list, tools_by_name: dict) -> None:
+    def _run_turn(
+        self,
+        tools: list[Tool],
+        tools_by_name: dict[str, Tool],
+        claimed: list[Message],
+    ) -> None:
         """一轮内部：反复「领 steer → 请求模型 → 执行工具」直到模型作答。"""
-        for _step in range(10):  # 安全阀：单轮最多 10 个 step
-            # 每个 step 开始前领 step 级输入：steer 在这里插队生效
-            if steer_message := self._inbox.claim_step():
+        for step in range(1, 11):  # 安全阀：单轮最多 10 个 step
+            if step > 1:
+                claimed = self._inbox.claim_step()
+            self._session.append("step/start", {"turn": self._turn_no, "step": step})
+            completed = False
+            try:
+                for message in claimed:
+                    self._session.append("user/message", {"content": message.content})
+
+                system_prompt = self._assembler.render(self._variables)
+                header = {
+                    "config": {"provider": "deepseek", "model": self._client.MODEL},
+                    "system": system_prompt,
+                    "tools": self._registry.schemas(),
+                }
+                header_fingerprint = json.dumps(
+                    header, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                )
+                if header_fingerprint != self._request_header:
+                    self._session.append(
+                        "request/header",
+                        {
+                            "header": header,
+                            "reason": "initial" if self._request_header is None else "change",
+                        },
+                    )
+                    self._request_header = header_fingerprint
+
+                messages = [
+                    Message(role="system", content=system_prompt),
+                    *self._session.derive_messages(),
+                ]
+                reply = self._client.chat(messages, tools)
                 self._session.append(
-                    "user/message",
-                    {"content": steer_message.content, "steered": True},
+                    "assistant/message",
+                    {
+                        "content": reply.content,
+                        "tool_calls": [
+                            {"id": c.id, "name": c.name, "arguments": c.arguments}
+                            for c in reply.tool_calls
+                        ],
+                    },
                 )
 
-            messages = [
-                Message(role="system", content=self._assembler.render(self._variables)),
-                *self._session.derive_messages(),
-            ]
-            reply = self._client.chat(messages, tools)
-            self._session.append(
-                "assistant/message",
-                {
-                    "content": reply.content,
-                    "tool_calls": [
-                        {"id": c.id, "name": c.name, "arguments": c.arguments}
-                        for c in reply.tool_calls
-                    ],
-                },
-            )
-
-            if not reply.tool_calls:
-                return  # 模型作答，本轮完成
-
-            for call in reply.tool_calls:
-                self._session.append(
-                    "tool/call",
-                    {"call_id": call.id, "name": call.name, "arguments": call.arguments},
-                )
-                tool = tools_by_name.get(call.name)
-                if tool is None:
-                    result = f"Error: 模型请求了未注册的工具 {call.name!r}"
+                if not reply.tool_calls:
+                    completed = True
                 else:
-                    try:
-                        args = json.loads(call.arguments)
-                        result = tool.execute(args)
-                    except Exception as error:
-                        result = f"工具执行出错: {error}"
+                    for call in reply.tool_calls:
+                        self._session.append(
+                            "tool/call",
+                            {
+                                "call_id": call.id,
+                                "name": call.name,
+                                "arguments": call.arguments,
+                            },
+                        )
+                        tool = tools_by_name.get(call.name)
+                        is_error = tool is None
+                        if tool is None:
+                            result = f"Error: 模型请求了未注册的工具 {call.name!r}"
+                        else:
+                            try:
+                                args = json.loads(call.arguments)
+                                result = tool.execute(args)
+                            except Exception as error:
+                                is_error = True
+                                result = f"工具执行出错: {error}"
+                        self._session.append(
+                            "tool/result",
+                            {"call_id": call.id, "content": result, "is_error": is_error},
+                        )
+            finally:
                 self._session.append(
-                    "tool/result",
-                    {"call_id": call.id, "content": result, "is_error": "出错" in result},
+                    "step/end", {"turn": self._turn_no, "step": step}
                 )
+
+            if completed and not self._inbox.has_next_step:
+                return
         raise RuntimeError(f"第 {self._turn_no} 轮超过 10 个 step 仍未结束")

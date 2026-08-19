@@ -7,14 +7,16 @@
 3. approve_once —— 一次性授权：allowed-once 只放行所请求的那一个动作。
 
 诚实边界：官方 bash-sandbox 用内核级隔离（seatbelt/landlock）把
-「文件写效应」挡在系统调用层（bash-sandbox 文档第 85 行
-「限制只覆盖文件影响」）；教学版不实现内核沙箱，只实现「模式门
+「文件写效应」挡在系统调用层，并明确限制只覆盖文件影响；
+教学版不实现内核沙箱，只实现「模式门
 + 审批」的决策层，并在对照表中明确差异。
 """
 
 from __future__ import annotations
 
+import shlex
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 
 # 审批结果四值（对应官方 dsh-user-approval 的四结果枚举）：
@@ -30,7 +32,7 @@ POLICY_NEVER = "never"
 
 # 只读命令白名单：read-only 模式下仅这些前缀的命令放行。
 # （教学简化——真实内核沙箱按系统调用拦截，不看命令文本。）
-READ_ONLY_PREFIXES = ("ls", "cat", "head", "tail", "grep", "find", "pwd", "wc")
+READ_ONLY_COMMANDS = {"ls", "cat", "head", "tail", "grep", "pwd", "wc"}
 
 
 @dataclass(frozen=True)
@@ -43,7 +45,13 @@ class CommandResult:
     timed_out: bool = False
 
 
-def run_command(command: str, cwd: str, timeout_seconds: float = 30.0) -> CommandResult:
+def run_command(
+    command: str,
+    cwd: str,
+    timeout_seconds: float = 30.0,
+    *,
+    use_shell: bool = True,
+) -> CommandResult:
     """执行一条 shell 命令，捕获输出，强制超时。
 
     subprocess 三件套：
@@ -53,9 +61,10 @@ def run_command(command: str, cwd: str, timeout_seconds: float = 30.0) -> Comman
     - shell=True：按 shell 语法解析（管道、重定向都可用）。
     """
     try:
+        argv: str | list[str] = command if use_shell else shlex.split(command)
         completed = subprocess.run(
-            command,
-            shell=True,
+            argv,
+            shell=use_shell,
             cwd=cwd,
             capture_output=True,
             text=True,
@@ -88,7 +97,7 @@ class ShellPolicy:
         self,
         mode: str = "read-only",
         approval_policy: str = POLICY_ASK,
-        approver=None,
+        approver: Callable[[str], str] | None = None,
     ) -> None:
         self.mode = mode
         self.approval_policy = approval_policy
@@ -115,11 +124,15 @@ class ShellPolicy:
             self._granted_once = None
             return True, "allowed-once（一次性授权）"
 
-        first_word = command.strip().split()[0] if command.strip() else ""
+        try:
+            words = shlex.split(command)
+        except ValueError as error:
+            return False, f"[sandbox] 无法解析命令: {error}"
+        first_word = words[0] if words else ""
 
         # 2) 模式门
         if self.mode == "read-only":
-            if any(first_word.startswith(prefix) for prefix in READ_ONLY_PREFIXES):
+            if first_word in READ_ONLY_COMMANDS:
                 return True, "read-only 白名单放行"
             return False, f"[sandbox] read-only 模式拒绝写类/未知命令: {command}"
 
@@ -144,4 +157,12 @@ class ShellPolicy:
                 stdout="",
                 stderr=f"{reason}\n（命令未执行）",
             )
-        return run_command(command, cwd, timeout_seconds)
+        # 教学版没有内核沙箱：只读白名单必须绕过 shell 解析，防止
+        # `ls; rm file` 这类“首命令看似只读、后续命令产生写效应”的绕过。
+        direct_read_only = reason == "read-only 白名单放行"
+        return run_command(
+            command,
+            cwd,
+            timeout_seconds,
+            use_shell=not direct_read_only,
+        )

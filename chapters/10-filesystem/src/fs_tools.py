@@ -27,12 +27,12 @@ class ObservationTracker:
     键统一用 resolve() 规范化——macOS 上 /var 是指向 /private/var 的
     符号链接，不做规范化会出现「读的是 A、写检查的是 B」的假阴性。"""
 
-    _observed: dict[str, float] = field(default_factory=dict)
+    _observed: dict[str, int] = field(default_factory=dict)
 
     def record_read(self, path: Path) -> None:
         key = str(path.resolve())
         try:
-            self._observed[key] = path.stat().st_mtime
+            self._observed[key] = path.stat().st_mtime_ns
         except FileNotFoundError:
             self._observed.pop(key, None)
 
@@ -43,7 +43,7 @@ class ObservationTracker:
             raise PermissionError(
                 f"[FS_NOT_OBSERVED] 修改 {path} 之前必须先 read 它"
             )
-        current = path.stat().st_mtime
+        current = path.stat().st_mtime_ns
         if current != self._observed[key]:
             raise PermissionError(
                 f"[FS_STALE_VERSION] {path} 自上次读取后被外部修改"
@@ -73,6 +73,7 @@ def write_file(
     if target.exists():
         tracker.check_write(target)
     target.write_text(content, encoding="utf-8")
+    tracker.record_read(target)
     return f"written {len(content)} chars to {target}"
 
 
@@ -101,6 +102,7 @@ def edit_file(
         )
     updated = text.replace(old_string, new_string)
     target.write_text(updated, encoding="utf-8")
+    tracker.record_read(target)
     return f"updated {target} ({count} 处替换)"
 
 

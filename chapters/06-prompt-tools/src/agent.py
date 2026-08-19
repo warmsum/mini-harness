@@ -20,7 +20,7 @@ def run_agent(
     registry: ToolRegistry,
     assembler: PromptAssembler,
     user_prompt: str,
-    max_turns: int = 10,
+    max_steps: int = 10,
     variables: dict[str, str] | None = None,
 ) -> Session:
     """跑一轮带工具调用的对话。请求 envelope = 组装出的 system + 注册表 schema。"""
@@ -30,46 +30,77 @@ def run_agent(
 
     session.append("turn/start", {"turn": 1})
     session.append("user/message", {"content": user_prompt})
-
-    for turn in range(max_turns):
-        messages = [
-            Message(role="system", content=assembler.render(variables)),
-            *session.derive_messages(),
-        ]
-        reply = client.chat(messages, tools)
-        session.append(
-            "assistant/message",
-            {
-                "content": reply.content,
-                "tool_calls": [
-                    {"id": c.id, "name": c.name, "arguments": c.arguments}
-                    for c in reply.tool_calls
-                ],
+    system_prompt = assembler.render(variables)
+    session.append(
+        "request/header",
+        {
+            "header": {
+                "config": {"provider": "deepseek", "model": client.MODEL},
+                "system": system_prompt,
+                "tools": registry.schemas(),
             },
+            "reason": "initial",
+        },
+    )
+
+    try:
+        for step in range(1, max_steps + 1):
+            session.append("step/start", {"turn": 1, "step": step})
+            completed = False
+            try:
+                messages = [
+                    Message(role="system", content=system_prompt),
+                    *session.derive_messages(),
+                ]
+                reply = client.chat(messages, tools)
+                session.append(
+                    "assistant/message",
+                    {
+                        "content": reply.content,
+                        "tool_calls": [
+                            {"id": c.id, "name": c.name, "arguments": c.arguments}
+                            for c in reply.tool_calls
+                        ],
+                    },
+                )
+
+                if not reply.tool_calls:
+                    completed = True
+                else:
+                    for call in reply.tool_calls:
+                        session.append(
+                            "tool/call",
+                            {
+                                "call_id": call.id,
+                                "name": call.name,
+                                "arguments": call.arguments,
+                            },
+                        )
+                        tool = tools_by_name.get(call.name)
+                        is_error = tool is None
+                        if tool is None:
+                            result = f"Error: 模型请求了未注册的工具 {call.name!r}"
+                        else:
+                            try:
+                                args = json.loads(call.arguments)
+                                result = tool.execute(args)
+                            except Exception as error:
+                                is_error = True
+                                result = f"工具执行出错: {error}"
+                        session.append(
+                            "tool/result",
+                            {"call_id": call.id, "content": result, "is_error": is_error},
+                        )
+            finally:
+                session.append("step/end", {"turn": 1, "step": step})
+            if completed:
+                session.append("turn/end", {"turn": 1, "reason": "completed"})
+                return session
+    except Exception as error:
+        session.append(
+            "turn/end", {"turn": 1, "reason": "error", "message": str(error)}
         )
+        raise
 
-        if not reply.tool_calls:
-            session.append("turn/end", {"turn": 1, "reason": "completed"})
-            return session
-
-        for call in reply.tool_calls:
-            session.append(
-                "tool/call",
-                {"call_id": call.id, "name": call.name, "arguments": call.arguments},
-            )
-            tool = tools_by_name.get(call.name)
-            if tool is None:
-                result = f"Error: 模型请求了未注册的工具 {call.name!r}"
-            else:
-                try:
-                    args = json.loads(call.arguments)
-                    result = tool.execute(args)
-                except Exception as error:
-                    result = f"工具执行出错: {error}"
-            session.append(
-                "tool/result",
-                {"call_id": call.id, "content": result, "is_error": "出错" in result},
-            )
-
-    session.append("turn/end", {"turn": 1, "reason": "max_turns"})
-    raise RuntimeError(f"Agent 在 {max_turns} 轮内没有结束")
+    session.append("turn/end", {"turn": 1, "reason": "max-steps"})
+    raise RuntimeError(f"Agent 在 {max_steps} 个 step 内没有结束")

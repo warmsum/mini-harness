@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
-from client import DeepSeekClient, Message
+from client import DeepSeekClient, Message, Tool
 from session import Session
 
 
@@ -28,14 +28,14 @@ class SubagentResult:
     只有正常完成才返回 output；失败路径保留已生成的部分文本。"""
 
     output: str
-    stop_reason: str  # "completed" / "max_turns" / "error"
+    stop_reason: str  # "completed" / "max-steps" / "error"
 
 
 def run_subagent(
     client: DeepSeekClient,
     task: str,
     system_prompt: str,
-    max_turns: int = 3,
+    max_steps: int = 3,
 ) -> SubagentResult:
     """运行一个子 agent：独立的 Session，只见 task，不见父历史。
 
@@ -48,7 +48,7 @@ def run_subagent(
 
     partial: str = ""
     try:
-        for _turn in range(max_turns):
+        for _step in range(max_steps):
             reply = client.chat(
                 [
                     Message(role="system", content=system_prompt),
@@ -65,11 +65,11 @@ def run_subagent(
                 return SubagentResult(output=reply.content, stop_reason="completed")
         return SubagentResult(
             output=partial,
-            stop_reason="max_turns",
+            stop_reason="max-steps",
         )
     except Exception as error:
-        # 失败保留部分文本（官方文档第 11 行：被截断的回答不会被报告为成功，
-        # 也绝不会被悄悄丢弃）
+        # 失败保留部分文本：被截断的回答不会被报告为成功，
+        # 也不会被悄悄丢弃。
         return SubagentResult(output=partial, stop_reason=f"error: {error}")
 
 
@@ -83,6 +83,8 @@ def run_subagents_parallel(
     多个子任务同时跑，总耗时 ≈ 最慢的那个，而不是逐个相加。
     官方在同一轮里对 isConcurrencySafe 的工具调用做并行调度，
     这里是对「多个 subagent 调用」的教学版并行。"""
+    if not specs:
+        return []
     with ThreadPoolExecutor(max_workers=len(specs)) as pool:
         futures = [
             pool.submit(run_subagent, client, task, system_prompt)
@@ -93,14 +95,11 @@ def run_subagents_parallel(
 
 def create_subagent_tool(
     client: DeepSeekClient, child_system_prompt: str
-) -> dict[str, Any]:
+) -> Tool:
     """把 run_subagent 包装成第 02 章风格的 Tool。
 
-    官方把「委派」做成一个真正的模型工具（tool-subagent 文档
-    第 5 行：基于一个已配置提供方、面向模型的委派工具）——模型在需要
+    官方把「委派」做成一个基于已配置 provider 的模型工具——模型在需要
     拆分任务时主动调用它，参数就是子任务描述。"""
-    from client import Tool
-
     def execute(args: dict[str, Any]) -> str:
         task = args.get("task")
         if not isinstance(task, str) or not task.strip():

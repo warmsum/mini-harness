@@ -52,25 +52,34 @@ class PromptSection:
 class PromptAssembler:
     def __init__(self) -> None:
         self._sections: list[PromptSection] = []
+        self._variables: dict[str, Callable[[], str]] = {}
 
     def section(self, name: str, text: str, order: int = 0) -> None:
-        """贡献一段。同名段后到者覆盖先到者。"""
-        self._sections = [s for s in self._sections if s.name != name]
+        if any(section.name == name for section in self._sections):
+            raise ValueError(f'提示词段 "{name}" 已被注册')
         self._sections.append(PromptSection(order=order, name=name, text=text))
 
+    def variable(self, name: str, provider: Callable[[], str]) -> None:
+        self._variables[name] = provider
+
     def render(self, variables: dict[str, str] | None = None) -> str:
-        ordered = sorted(self._sections, key=lambda s: (s.order, s.name))
+        ordered = sorted(self._sections, key=lambda s: s.order)
         text = "\n\n".join(section.text for section in ordered)
-        for name, value in (variables or {}).items():
+        resolved = {name: provider() for name, provider in self._variables.items()}
+        resolved.update(variables or {})
+        for name, value in resolved.items():
             text = text.replace("{{" + name + "}}", value)
+        unresolved = re.findall(r"{{([a-zA-Z_][a-zA-Z0-9_]*)}}", text)
+        if unresolved:
+            raise KeyError(f"未注册的提示词变量: {', '.join(unresolved)}")
         return text
 ```
 
 三个机制：
 
-1. 排序键 `(order, name)`。order 是主键，数字小的在前；name 是兜底，两个段 order 相同时按名字排，结果稳定。官方用负数 order 放固定开场白，includeHarnessIdentity 的默认顺序是 −100，0 是 persona 的位置，工具引导用 100–199。教学版的人设段用 0、规则段用 100，同一条思路。
-2. 同名覆盖。同名段重复贡献时后者胜。真实场景里这是 agent 级人设遮蔽全局人设的基础，官方 persona 正是顺序 0 的段，被 agent 作用域的贡献遮蔽。
-3. 变量替换。`render(variables)` 把 `{{name}}` 换成真实值。替换只发生在 render 时，段文本保持模板原样，同一份模板可以配不同的变量渲染出不同结果。
+1. 只按 `order` 排序；Python 的稳定排序会让相同 order 保持注册顺序。官方也保留同序贡献的注册顺序，而不是另按名称重排。
+2. 同一层的同名段立即报错。官方的“遮蔽”发生在不同 scope 层之间，不能把它误解为同一注册表里后者静默覆盖前者。
+3. 变量由 `variable(name, provider)` 注册，provider 每次 render 重新求值。模板引用了未知变量会直接失败，避免把 `{{typo}}` 发给模型。
 
 ## 6.3 ToolRegistry：从列表到注册表
 
@@ -90,7 +99,7 @@ class ToolRegistry:
         return self._tools.get(name)
 
     def all(self) -> list[Tool]:
-        return list(self._tools.values())
+        return [self._tools[name] for name in sorted(self._tools)]
 
     def schemas(self) -> list[dict[str, Any]]:
         """投影出给模型看的说明书清单：不含 execute。"""
@@ -100,11 +109,11 @@ class ToolRegistry:
                 "description": tool.description,
                 "parameters": tool.parameters,
             }
-            for tool in self._tools.values()
+            for tool in self.all()
         ]
 ```
 
-注册是入口校验点：重名即抛错，两个同名工具会让模型传参产生歧义，必须在入口挡掉。`schemas()` 是注册表与裸列表的关键区别：模型侧逻辑拿到的永远只是说明书投影，执行器留在程序侧。官方 core/tools 文档写明，schemas 返回该作用域可见的所有 schema，不含 execute 函数。这个分离在官方叫 schema 投影，也是第 12 章技能和所有后续工具章节的基础。
+注册是入口校验点：重名即抛错。`all()` 默认按工具名排序，使相同工具集合产生稳定的请求 envelope；官方也默认按名称排序，只有显式 `toolOrder` 才改变顺序。`schemas()` 只投影模型需要的说明书，不包含执行器。
 
 ## 6.4 接进循环：envelope 的两半
 
@@ -112,13 +121,13 @@ class ToolRegistry:
 
 ```python
 def run_agent(client, registry, assembler, user_prompt,
-              max_turns=10, variables=None) -> Session:
+              max_steps=10, variables=None) -> Session:
     tools = registry.all()
     tools_by_name = {tool.name: tool for tool in tools}
     session = Session()
     # ...turn/start、user/message 与第 05 章相同
 
-    for turn in range(max_turns):
+    for step in range(1, max_steps + 1):
         messages = [
             Message(role="system", content=assembler.render(variables)),
             *session.derive_messages(),
@@ -173,7 +182,7 @@ uv run python chapters/06-prompt-tools/src/demo.py
 
 ## 本章小结
 
-- `PromptSection` / `PromptAssembler`：段的贡献、确定性排序（order+name）、同名覆盖、变量替换
+- `PromptSection` / `PromptAssembler`：稳定 order 排序、同层重名拒绝、变量 provider 与严格替换
 - `ToolRegistry`：注册查重、`schemas()` 说明书投影，模型接口与执行接口分离
 - 循环改造：请求 envelope 的两半，组装出的 system 与注册表的 tools
 
@@ -181,16 +190,16 @@ uv run python chapters/06-prompt-tools/src/demo.py
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/core/system-prompt/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/core/system-prompt/README.zh.md) | `PromptAssembler` | 组装注册表定义在第 5 行；`section()` 贡献段在第 20 行；`variable()` 具名变量在第 24 行 |
-| 同上，第 13 行 | 同名覆盖 | 官方 persona 是顺序 0 的段，agent 作用域的贡献将其遮蔽，与教学版同名覆盖同构 |
-| 同上，第 11、14 行 | 排序确定性 | 官方固定开场白顺序 −100；toolOrder 显式指定工具顺序，未列工具按名称字典序，注册顺序不影响结果 |
-| [`packages/core/tools/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/core/tools/README.zh.md) | `ToolRegistry` | `register` 在第 20 行，`schemas()` 不含 execute 在第 24 行 |
+| [`packages/core/system-prompt/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/core/system-prompt/README.zh.md) | `PromptAssembler` | 对齐有序 section、同层重名拒绝与每次 render 求值的具名 variable |
+| 同上 | scope 与重名 | 跨 scope 最近层可以遮蔽远层；同一层重复 section 名称会报错 |
+| 同上 | 排序确定性 | section 同 order 保持注册顺序；工具默认按名称排序，显式 `toolOrder` 才覆盖 |
+| [`packages/core/tools/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/core/tools/README.zh.md) | `ToolRegistry` | 对齐注册表与模型面 schema；执行器只留在本地，不进入请求 envelope |
 
 官方比教学版多一块：工具 schema 属于组装结果本身。core/tools 文档写明注册表通过 `ctx.systemPrompt.tools()` 自动把工具 schema 送入系统提示词组装，模型获知自己能做什么是一个连贯整体，适配器再把 schema 作为独立 wire 字段传输。教学版把两者分开渲染，协议原生的 tools 字段直接交给 client，结构更直观，差异在练习 3 展开。
 
 ## 练习
 
 1. **顺序实验。** 把规则段的 order 改成 −10，跑 demo 观察规则段是否排到人设段前面；再解释确定性排序对调试的价值：同一个 bug 为什么必须能稳定复现。
-2. **同名覆盖。** 贡献两个同名段，内容与 order 都不同，观察哪个生效；把这个行为与官方 agent 人设遮蔽全局人设联系起来，说明两者各自解决什么场景。
+2. **同名拒绝。** 贡献两个同名段，观察第二次注册如何立刻失败；再解释为什么跨 scope 遮蔽与同层重名是两件不同的事。
 3. **工具目录段。** 仿照官方，把 `registry.schemas()` 渲染成一段文本，作为 order 50 的段贡献给组装器。对比协议 tools 字段与写进提示词两种方式，模型是否还会按 JSON Schema 传参，token 消耗有什么差异。
-4. **变量缺省。** 在 demo 里删掉 `variables={"name": "小算"}` 这个传参，观察 `{{name}}` 原样进入请求后模型如何理解它。官方对未提供值的变量会直接抛错，教学版选择原样通过，权衡一下两种策略。
+4. **变量缺省。** 在 demo 里删掉 `variables={"name": "小算"}`，观察 render 如何在请求发出前直接报错；再用 `assembler.variable("name", lambda: "小算")` 修复。

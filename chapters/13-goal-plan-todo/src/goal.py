@@ -1,22 +1,23 @@
 """第 13 章：Goal —— 长任务的目标状态机。
 
 对应官方 packages/goal/goal。核心语义（packages/goal/goal）：
-1. 事件溯源：目标状态以 goal/change 事件进入会话日志，日志是唯一持久权威（文档第 24 行）；
-2. 单一目标：最多只有一个当前目标，revision 从 1 开始（文档第 22 行）；
+1. 事件溯源：目标状态以 goal/change 事件进入会话日志，日志是唯一持久权威；
+2. 单一目标：最多只有一个当前目标，revision 从 1 开始；
 3. 动词集合：create / edit / pause / resume / complete / block；
-4. 变更经 revision 比较并设置防护（Compare-and-Swap），拒绝陈旧引用（文档第 20 行）；
-5. 续行启用状态绝不持久化：会话恢复后必须显式 resume（文档第 28 行）。
+4. 变更经 revision 比较并设置防护（Compare-and-Swap），拒绝陈旧引用；
+5. 续行启用状态绝不持久化：会话恢复后必须显式 resume。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import Any
 
 from session import Session
 
 PHASE_ACTIVE = "active"
 PHASE_PAUSED = "paused"
-PHASE_COMPLETED = "completed"
+PHASE_COMPLETE = "complete"
 PHASE_BLOCKED = "blocked"
 
 
@@ -68,8 +69,8 @@ class GoalStore:
 
     def create(self, objective: str, max_rounds: int = 30) -> GoalRef:
         """创建目标。官方：最多只有一个当前目标；create 生成
-        revision=1、phase=active 的目标并启用续行（文档第 22 行）。"""
-        if self._current is not None and self._current.phase != PHASE_COMPLETED:
+        revision=1、phase=active 的目标并启用续行。"""
+        if self._current is not None and self._current.phase != PHASE_COMPLETE:
             raise ValueError("已有进行中的目标：必须先 complete 或 clear")
         goal = Goal(
             id=f"goal-{self._session.seq}",
@@ -78,11 +79,11 @@ class GoalStore:
             objective=objective,
             max_rounds=max_rounds,
         )
-        self._commit(goal)
+        self._commit(goal, "create")
         return GoalRef(id=goal.id, revision=goal.revision)
 
     def edit(self, ref: GoalRef, objective: str) -> GoalRef:
-        """编辑目标文本。官方：编辑保留 phase、blocker reason 与 activation（文档第 22 行）。"""
+        """编辑目标文本。官方语义保留 phase、blocker reason 与 activation。"""
         current = self._require(ref)
         goal = Goal(
             id=current.id,
@@ -93,52 +94,69 @@ class GoalStore:
             rounds_started=current.rounds_started,
             blocker_reason=current.blocker_reason,
         )
-        self._commit(goal)
+        self._commit(goal, "edit")
         return GoalRef(id=goal.id, revision=goal.revision)
 
     def pause(self, ref: GoalRef) -> GoalRef:
         current = self._require(ref)
-        self._commit(self._with_phase(current, PHASE_PAUSED, current.blocker_reason))
+        self._commit(
+            self._with_phase(current, PHASE_PAUSED, current.blocker_reason), "pause"
+        )
         return GoalRef(id=current.id, revision=current.revision + 1)
 
     def resume(self, ref: GoalRef) -> GoalRef:
         """恢复。官方：只有配置的 Round 上限仍有剩余容量时，resume 才接受
-        已停止 phase 或 phase=active 但已停用续行的目标；清除 blocker reason（文档第 22 行）。"""
+        已停止 phase 或 phase=active 但已停用续行的目标；清除 blocker reason。"""
         current = self._require(ref)
         if current.rounds_started >= current.max_rounds:
             raise ValueError("目标轮次已达上限，无法 resume")
-        self._commit(self._with_phase(current, PHASE_ACTIVE, None))
+        self._commit(self._with_phase(current, PHASE_ACTIVE, None), "resume")
         return GoalRef(id=current.id, revision=current.revision + 1)
 
     def complete(self, ref: GoalRef) -> GoalRef:
         current = self._require(ref)
-        self._commit(self._with_phase(current, PHASE_COMPLETED, None))
+        self._commit(self._with_phase(current, PHASE_COMPLETE, None), "complete")
         return GoalRef(id=current.id, revision=current.revision + 1)
 
     def block(self, ref: GoalRef, reason: str) -> GoalRef:
         """阻塞：记录策略代码与规范化文本说明（教学版只留文本）。
-        官方：阻塞会停用续行，只记录一个持久 phase（文档第 22 行）。"""
+        官方语义中阻塞会停用续行，只记录一个持久 phase。"""
         current = self._require(ref)
-        self._commit(self._with_phase(current, PHASE_BLOCKED, reason))
+        self._commit(self._with_phase(current, PHASE_BLOCKED, reason), "block")
         return GoalRef(id=current.id, revision=current.revision + 1)
+
+    def clear(self, ref: GoalRef) -> None:
+        """清除当前目标，并用带 revision 的 tombstone 留下持久记录。"""
+        current = self._require(ref)
+        cleared = {"id": current.id, "revision": current.revision + 1}
+        self._session.append(
+            "goal/change", {"version": 1, "operation": "clear", "cleared": cleared}
+        )
+        self._current = None
 
     def admit_round(self) -> GoalRef:
         """接纳一个目标轮次（官方：只有来源为 goal 且已准入的
-        user/message 事件会推进正数 Round，文档第 26 行）。
-        与其他动词一致：返回新引用，旧引用随之失效。"""
+        user/message 事件会推进正数 Round）。
+        轮次是 goal 来源消息的投影，不是 goal/change；因此它不推进 revision。"""
         if self._current is None or self._current.phase != PHASE_ACTIVE:
             raise ValueError("没有 active 目标，无法接纳轮次")
-        goal = Goal(
-            id=self._current.id,
-            revision=self._current.revision + 1,
-            phase=self._current.phase,
-            objective=self._current.objective,
-            max_rounds=self._current.max_rounds,
-            rounds_started=self._current.rounds_started + 1,
-            blocker_reason=self._current.blocker_reason,
+        next_round = self._current.rounds_started + 1
+        if next_round > self._current.max_rounds:
+            raise ValueError("目标轮次已达上限")
+        self._session.append(
+            "user/message",
+            {
+                "content": self._current.objective,
+                "source": {
+                    "kind": "goal",
+                    "goal_id": self._current.id,
+                    "revision": self._current.revision,
+                    "round": next_round,
+                },
+            },
         )
-        self._commit(goal)
-        return GoalRef(id=goal.id, revision=goal.revision)
+        self._current = replace(self._current, rounds_started=next_round)
+        return GoalRef(id=self._current.id, revision=self._current.revision)
 
     # ------------------------------------------------------------------
     # 内部：revision 守卫 + 事件提交 + 重放
@@ -169,23 +187,57 @@ class GoalStore:
             blocker_reason=blocker,
         )
 
-    def _commit(self, goal: Goal) -> None:
-        """每次变更追加 goal/change 事件（携带变更后的完整快照，文档第 24 行）。"""
+    def _commit(self, goal: Goal, operation: str) -> None:
+        """每次变更追加 goal/change 事件，并携带变更后的完整快照。"""
         self._current = goal
-        self._session.append("goal/change", _goal_to_dict(goal))
+        self._session.append(
+            "goal/change",
+            {"version": 1, "operation": operation, "goal": _goal_to_dict(goal)},
+        )
 
     @classmethod
     def replay(cls, session: Session) -> "GoalStore":
         """严格回放：只从 goal/change 事件派生状态。
 
         revision 连续性只在同一目标内检查——每个新目标（id 不同）
-        的 revision 都从 1 重新开始（文档第 22 行，create 生成 revision=1）。"""
+        的 revision 都从 1 重新开始（create 生成 revision=1）。"""
         store = cls(session)
         for event in session.events:
+            if event.type == "user/message":
+                source = event.data.get("source")
+                if not isinstance(source, dict) or source.get("kind") != "goal":
+                    continue
+                current = store._current
+                if (
+                    current is None
+                    or current.phase != PHASE_ACTIVE
+                    or source.get("goal_id") != current.id
+                    or source.get("revision") != current.revision
+                    or source.get("round") != current.rounds_started + 1
+                    or source["round"] > current.max_rounds
+                ):
+                    raise ValueError("goal round 不连续或引用了错误的目标")
+                store._current = replace(current, rounds_started=source["round"])
+                continue
             if event.type != "goal/change":
                 continue
-            goal = _goal_from_dict(event.data)
+            operation = event.data.get("operation")
             previous = store._current
+            if operation == "clear":
+                cleared = event.data.get("cleared")
+                if (
+                    previous is None
+                    or not isinstance(cleared, dict)
+                    or cleared.get("id") != previous.id
+                    or cleared.get("revision") != previous.revision + 1
+                ):
+                    raise ValueError("goal clear tombstone 无效")
+                store._current = None
+                continue
+            raw_goal = event.data.get("goal")
+            if not isinstance(raw_goal, dict):
+                raise ValueError("goal/change 缺少完整 goal 快照")
+            goal = _goal_from_dict(raw_goal)
             if (
                 previous is not None
                 and previous.id == goal.id
@@ -196,7 +248,7 @@ class GoalStore:
         return store
 
 
-def _goal_to_dict(goal: Goal) -> dict:
+def _goal_to_dict(goal: Goal) -> dict[str, Any]:
     return {
         "id": goal.id,
         "revision": goal.revision,
@@ -208,7 +260,7 @@ def _goal_to_dict(goal: Goal) -> dict:
     }
 
 
-def _goal_from_dict(data: dict) -> Goal:
+def _goal_from_dict(data: dict[str, Any]) -> Goal:
     return Goal(
         id=data["id"],
         revision=data["revision"],

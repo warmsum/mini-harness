@@ -33,7 +33,7 @@ def main() -> None:
         system_prompt="你是一个数学助手。遇到算式时先调用 calculator 工具计算，"
         "再基于计算结果回答。",
         user_prompt="1+2*3 等于几？",
-        max_turns=10,
+        max_steps=10,
     )
     print("=== 完整对话历史 ===")
     print_history(history)

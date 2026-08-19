@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from context import Context
 
 
@@ -25,7 +27,7 @@ def agent(ctx: Context, _config: object) -> None:
     print(f"  [agent] 启动！llm={ctx.llm} tools={ctx.tools}")
 
 
-agent.inject = ["llm", "tools"]  # 依赖声明：官方 cordis 的 Object.assign 模式
+setattr(agent, "inject", ["llm", "tools"])  # 官方 cordis 的 Object.assign 模式
 
 
 def tools_provider(ctx: Context, _config: object) -> None:
@@ -35,7 +37,7 @@ def tools_provider(ctx: Context, _config: object) -> None:
 
 def tools_provider_v2(ctx: Context, _config: object) -> None:
     ctx.provide("tools", {"calculator": "v2"})
-    print("  [tools-provider-2] 重新提供 tools（版本+1）")
+    print("  [tools-provider-2] 已提供 tools v2")
 
 
 def main() -> None:
@@ -47,17 +49,24 @@ def main() -> None:
     agent_handle = ctx.plugin(agent)
     print(f"  [agent] 当前状态: {agent_handle.state}   ← 依赖不齐，安静等待")
 
-    ctx.plugin(tools_provider)
+    tools_handle = ctx.plugin(tools_provider)
     print(f"  [agent] 当前状态: {agent_handle.state}      ← 依赖齐了，自动启动！")
 
     print()
     print("=== 时刻 2：提供者被卸载，依赖方自动卸载 ===")
 
-    tools_handle = ctx.plugin(tools_provider_v2)
-    print(f"  重新 provide tools（版本+1）后 [agent] 状态: {agent_handle.state}")
+    try:
+        ctx.plugin(tools_provider_v2)
+    except ValueError as error:
+        print(f"  重名服务被拒绝: {error}")
 
     tools_handle.dispose()
-    print(f"  卸载 tools 提供者后 [agent] 状态: {agent_handle.state}   ← 级联卸载")
+    print(f"  卸载 tools v1 后 [agent] 状态: {agent_handle.state}")
+    tools_handle = ctx.plugin(tools_provider_v2)
+    print(f"  注册 tools v2 后 [agent] 状态: {agent_handle.state}")
+
+    tools_handle.dispose()
+    print(f"  卸载 tools v2 后 [agent] 状态: {agent_handle.state}   ← 级联卸载")
 
     print()
     print("=== 时刻 3：读服务必须 inject ===")
@@ -71,7 +80,7 @@ def main() -> None:
     print("=== 时刻 4：waterfall 瀑布 ===")
 
     def timeout_policy(c: Context, _config: object) -> None:
-        def wrap(exec_: dict, next_: object) -> str:
+        def wrap(exec_: dict[str, str], next_: Callable[[], str]) -> str:
             print(f"  [timeout-policy] 开始执行工具 {exec_['name']}")
             result = next_()  # 放行进入内层，返回值沿链回传
             print(f"  [timeout-policy] 工具 {exec_['name']} 完成")
@@ -81,7 +90,7 @@ def main() -> None:
 
     ctx.plugin(timeout_policy)
 
-    def core_executor(exec_: dict) -> str:
+    def core_executor(exec_: dict[str, str]) -> str:
         print(f"  [core] 真正执行 {exec_['name']}……")
         return "计算结果: 42"
 

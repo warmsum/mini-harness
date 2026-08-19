@@ -52,6 +52,8 @@ class SandboxPolicy:
     def fence_write(self, target: Path) -> Path:
         if self.mode == DANGER_FULL_ACCESS:
             return target
+        if self.mode == READ_ONLY:
+            raise SandboxDeniedError(str(target), self.mode)
         resolved = target.resolve()
         for root in self.writable_roots():
             root_resolved = root.resolve()
@@ -76,12 +78,12 @@ class SandboxPolicy:
 ```python
 @dataclass
 class ObservationTracker:
-    _observed: dict[str, float] = field(default_factory=dict)
+    _observed: dict[str, int] = field(default_factory=dict)
 
     def record_read(self, path: Path) -> None:
         key = str(path.resolve())
         try:
-            self._observed[key] = path.stat().st_mtime
+            self._observed[key] = path.stat().st_mtime_ns
         except FileNotFoundError:
             self._observed.pop(key, None)
 
@@ -89,7 +91,7 @@ class ObservationTracker:
         key = str(path.resolve())
         if key not in self._observed:
             raise PermissionError(f"[FS_NOT_OBSERVED] 修改 {path} 之前必须先 read 它")
-        current = path.stat().st_mtime
+        current = path.stat().st_mtime_ns
         if current != self._observed[key]:
             raise PermissionError(
                 f"[FS_STALE_VERSION] {path} 自上次读取后被外部修改"
@@ -99,7 +101,7 @@ class ObservationTracker:
 
 - 观察记录使用 mtime 快照：读文件时记下修改时间，写入前再次比较。mtime 的实际时间分辨率取决于文件系统；如果两次修改间隔过短，记录值可能不变，因此 demo 在模拟外部修改前短暂等待。
 - 键用 `resolve()` 规范化。macOS 上 `/var` 是指向 `/private/var` 的符号链接，读时记的键和写时查的键若不统一，会出现明明读过却报没读的假阴性。
-- 两道门都只防无意的覆盖。CAS 的语义是比较后交换：读完作为比较基准，之后写完之前世界没变才放行，变了就要求重新读。这是并发编辑的最小防御，不是文件锁。
+- 两道门都只防无意的覆盖。CAS 的语义是比较后交换：读完作为比较基准，之后写完之前世界没变才放行，变了就要求重新读。成功写入后观察器会记录新版本，因此同一 Agent 后续写入仍有新鲜基准。这是并发编辑的最小防御，不是文件锁。
 
 ## 10.4 四个文件工具
 
@@ -196,9 +198,9 @@ todo.txt
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/fs/fs-sandbox/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/fs/fs-sandbox/README.zh.md) | `SandboxPolicy` | 三模式与可写根集合在第 16 行；约束而非安全边界的定位在第 21 行；结构化 FsError 在第 23 行 |
-| [`packages/fs/fs-observation-policy/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/fs/fs-observation-policy/README.zh.md) | `ObservationTracker` | 官方读后写 CAS 思想；官方经 fs 事件门禁实现，write-intent 与 observed 两类事件，教学版简化为 mtime 快照 |
-| [`packages/fs/tool-fs/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/fs/tool-fs/README.zh.md) | 四个工具 | 官方工具层还负责把 FsError 渲染成模型可见的 sandbox 标记 |
+| [`packages/fs/fs-sandbox/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/fs/fs-sandbox/README.zh.md) | `SandboxPolicy` | 对齐三种模式、可写根集合、“约束而非安全边界”的定位与结构化 FsError |
+| [`packages/fs/fs-observation-policy/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/fs/fs-observation-policy/README.zh.md) | `ObservationTracker` | 官方读后写 CAS 思想；官方经 fs 事件门禁实现，write-intent 与 observed 两类事件，教学版简化为 mtime 快照 |
+| [`packages/fs/tool-fs/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/fs/tool-fs/README.zh.md) | 四个工具 | 官方工具层还负责把 FsError 渲染成模型可见的 sandbox 标记 |
 
 ## 练习
 

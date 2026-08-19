@@ -35,7 +35,7 @@
 
 ## 17.2 入口：headless runner
 
-包的入口 `__main__.py` 实现官方 headless runner 的语义：创建 Agent，把任务作为普通用户消息提交，等待完全停稳，最后一条 assistant 文本写 stdout，完成与否决定退出码：
+包的入口 `__main__.py` 实现官方 headless runner 的核心语义：创建 Agent，把任务作为普通用户消息提交，等待完全停稳，持久化会话，把最后一条 assistant 文本写 stdout，再让最终轮次的原因决定退出码：
 
 ```python
 def run_task(task: str, session_file: str = SESSION_FILE) -> tuple[str, bool]:
@@ -65,12 +65,25 @@ def run_task(task: str, session_file: str = SESSION_FILE) -> tuple[str, bool]:
 
 四个设计点，全部来自前面的章节：
 
-1. 任务就是一条普通用户消息，官方第 7 行同款。入口不做任何特殊处理，任务与对话里任何一句话地位相同，这让第 07 章的循环、第 05 章的日志都无需为 headless 开特例。
+1. 任务就是一条普通用户消息。入口不做任何特殊处理，任务与对话里任何一句话地位相同，这让第 07 章的循环、第 05 章的日志都无需为 headless 开特例。
 2. stdout 只放最终答案。计量、持久化这类过程信息走 stderr。stdout 的契约是给调用脚本的结果，混入日志会让脚本无法解析。官方在成功运行时保持 stderr 为空，教学版放宽为过程信息走 stderr。
 3. 退出码等于完成与否：最终 turn/end 完成则 0，否则 1。调用脚本据此判断成功失败，而不是解析输出文本。
-4. 落盘在退出前。会话先持久化再交回结果，即使调用方拿到结果后立刻杀掉进程，这次运行也有据可查，第 08 章的原子发布保证落盘完整。
+4. 落盘在退出前。首次保存经临时文件原子发布，后续保存先验证磁盘是内存日志的前缀，再只追加新增事件并 `fsync`。它既不覆盖历史，也不在每次 step 后整文件重写。
 
-## 17.3 运行完整示例
+## 17.3 组装后仍然成立的不变量
+
+最终包不是把旧章节代码简单复制到一起。下面这些后来补齐的规则也必须保留：
+
+- 流式响应只有收到 `[DONE]` 才算完整；连接静默中断时抛错，不能把半条回答记为完整消息。
+- Inbox 在 turn 边界先领取整批 next-step，再领取一条 next-turn；step 边界一次领取整批 steer。模型刚完成时若又有 steer，就在当前 turn 继续下一个 step。
+- 每次模型调用都由 `step/start` 与 `step/end` 包住；`request/header` 只在 system、模型配置或工具 schema 变化时追加。
+- Session 事件与嵌套 data 都是不可变快照，并拒绝无法无损写入 JSON 的值。
+- 工具名稳定排序，prompt 同层重名立即失败，未知变量立即失败。
+- 崩溃恢复只截断末尾未换行片段；完整坏行会报错。恢复时依次补齐开放的 `tool/result`、`step/end` 和真实 turn 编号的 `turn/end`。
+
+这些规则分别来自前面章节，但只有在 capstone 里一起成立，headless 输出才可信：一个缺失的 `[DONE]`、一个未闭合的 step 或一次覆盖式保存，都可能让调用方把不完整运行误判为成功。
+
+## 17.4 运行完整示例
 
 ```bash
 uv run python chapters/17-headless-capstone/src/demo.py
@@ -97,7 +110,7 @@ uv run python chapters/17-headless-capstone/src/demo.py
   [exit] 0（正常完成）
 
 === ③ 会话落盘并读回 ===
-  读回 7 条事件（第 08 章的持久化在工作）
+  读回 N 条事件（数量取决于模型是否调用工具）
 ```
 
 开头两行 [meter] 与 [persist] 是 stderr 上的过程信息，先于 stdout 出现是因为 stderr 不缓冲，这也正是两路输出分开的原因。也可以直接用包的入口跑，在 src 目录下：
@@ -107,7 +120,7 @@ cd chapters/17-headless-capstone/src
 uv run python -m mini_harness "1+2*3 等于几？"
 ```
 
-## 17.4 全书回顾：完整运行流程
+## 17.5 全书回顾：完整运行流程
 
 下图按一次任务的执行顺序连接前面章节的核心机制：
 
@@ -115,11 +128,14 @@ uv run python -m mini_harness "1+2*3 等于几？"
 flowchart TB
     TASK[任务文本] --> INBOX[第07章 inbox]
     INBOX --> LOOP[第07章 常驻循环]
-    LOOP --> ENV[第06章 envelope 组装<br>提示词 + 工具清单]
+    LOOP --> STEP[step/start]
+    STEP --> ENV[第06章 envelope 组装<br>提示词 + 工具清单]
     ENV --> CALL[第01/02章 模型调用]
     CALL -->|tool_calls| TOOLS[第02章 工具执行]
-    TOOLS -->|结果回灌| LOOP
-    LOOP --> LOG[第05章 事件日志]
+    TOOLS -->|结果回灌| STEP
+    CALL -->|final text| END[step/end / turn/end]
+    STEP --> LOG[第05章 仅追加事件日志]
+    END --> LOG
     LOG --> METER[第09章 token 计量]
     METER -->|压力过高| COMPACT[第09章 压缩]
     COMPACT --> LOG
@@ -139,10 +155,10 @@ flowchart TB
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/bundle/headless/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/bundle/headless/README.zh.md) | `mini_harness` 包 | 一次性任务组合包、不挂载 Host 与 HTTP 在第 5 行；runner 语义在第 7 行：任务即用户消息、stdout 出答案、完成则退出码 0 否则 1，与本章一一对应 |
+| [`packages/bundle/headless/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/bundle/headless/README.zh.md) | `mini_harness` 包 | 对齐一次性任务、不挂载 Host/HTTP、任务即用户消息、先持久化、stdout 输出和退出码语义 |
 | 官方 `dsh --profile headless "task"` | `python -m mini_harness "task"` | 官方的任务文本就是命令行参数，教学版同款 |
 
-官方 headless 组合包在 dsh-base 上叠加 headless-runner 插件，并由 cordis 完成装配；教学版直接组合前 16 章的模块。两者实现形态不同，但都遵循一次性接收任务、等待完成并返回结果的语义。各章末尾的“对照官方”列出了对应源码位置。
+官方 headless 组合包在 dsh-base 上叠加 headless-runner 插件，并由 cordis 完成装配；教学版直接组合前 16 章的模块。官方会先 `flush` Session，再只汇总本次 runner 持有的事件区间；遇到最终 error 时把 code/message 写 stderr，成功时 stderr 为空。教学版新建空 Session，因此全量汇总与本次区间等价，但会额外把 meter 和持久化路径写到 stderr。两者实现形态不同，核心的一次性任务语义一致。
 
 ## 练习
 

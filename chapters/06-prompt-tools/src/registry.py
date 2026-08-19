@@ -32,7 +32,8 @@ class ToolRegistry:
         return self._tools.get(name)
 
     def all(self) -> list[Tool]:
-        return list(self._tools.values())
+        """默认按名称排序，保证请求 envelope 与 KV-cache 前缀稳定。"""
+        return [self._tools[name] for name in sorted(self._tools)]
 
     def schemas(self) -> list[dict[str, Any]]:
         """投影出「给模型看的说明书清单」：只有 name/description/
@@ -44,5 +45,5 @@ class ToolRegistry:
                 "description": tool.description,
                 "parameters": tool.parameters,
             }
-            for tool in self._tools.values()
+            for tool in self.all()
         ]

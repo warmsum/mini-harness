@@ -42,7 +42,7 @@ def plugin_b(ctx, _config):
 2. 无法卸载。A 被卸载后，`llm_client` 该不该清空？B 还指着它呢。
 3. 无法替换。测试时如果要给 B 换成模拟模型，只能修改共享的全局变量，也会影响其他使用者。
 
-依赖注入把找服务从用服务里拆出来。B 不主动找 A，只声明我需要一个叫 llm 的服务；环境负责在 llm 就绪时启动 B，把服务递进 B 的手里，记在 B 的依赖快照里。B 从此不关心 llm 是谁提供的、什么时候提供的、会不会被换成别的。
+依赖注入把找服务从用服务里拆出来。B 不主动找 A，只声明我需要一个叫 llm 的服务；环境负责在 llm 就绪时启动 B，把服务递进 B 的手里，记在 B 的依赖快照里。B 不关心 llm 是谁提供的、什么时候提供的。若要更换实现，先卸载旧 provider，再注册新 provider；同名服务不会被静默覆盖。
 
 官方把这套机制做得更彻底：连读服务这个动作都要检查有没有声明依赖，读未声明的服务直接报错。为什么这么严格？一个没有声明约束的框架里，任何插件都能随手抓任何服务，插件之间的真实依赖关系散落在几百个文件里，卸载一个服务时没人知道谁会受影响。强制声明让依赖关系写在了明面上，环境的登记簿里查得到每个插件依赖谁。
 
@@ -58,13 +58,16 @@ class Context:
         self._version = 0
 
     def provide(self, name: str, value: object) -> Disposer:
+        if name in self._services:
+            raise ValueError(f'服务 "{name}" 已被注册')
         self._version += 1
         provider_uid = self._current.uid if self._current is not None else 0
-        self._services[name] = (value, provider_uid, self._version)
+        registration = (value, provider_uid, self._version)
+        self._services[name] = registration
         self._notify()
 
         def unregister() -> None:
-            if name in self._services:
+            if self._services.get(name) is registration:
                 del self._services[name]
                 self._notify()
 
@@ -82,7 +85,7 @@ class Context:
 - `provider_uid` 是谁提供的。第 03 章给每个句柄发过全局唯一的 uid。
 - `version` 是第几次 provide。每次 `provide` 递增，同名服务被重新提供时 version 变化，依赖方据此知道自己手里的服务过期了。
 
-`provide` 把注销函数挂到了当前插件名下，提供者被卸载，服务随之注销。这是第 03 章的 effect 机制自动完成的，服务跟着它的提供者走。
+`provide` 把 single-shot 注销函数挂到当前插件名下，提供者被卸载，服务随之注销。注册时若名称已经存在会立即报错，调用方必须先卸载旧 provider；注销时还会检查服务表里仍是自己的那一条注册，绝不会误删后来者。
 
 `_notify()` 遍历全部句柄重算依赖，是整套机制的中枢：
 
@@ -109,7 +112,7 @@ agent.inject = ["llm", "tools"]
 class PluginHandle:
     def __init__(self, ctx, plugin, config):
         # 第 03 章字段略
-        self.inject = frozenset(getattr(plugin, "inject", ()))
+        self.inject = tuple(dict.fromkeys(getattr(plugin, "inject", ())))
         self._store: dict[str, object] = {}   # 依赖快照
         self._epoch: str | None = None        # 依赖签名
         # 其余同第 03 章
@@ -159,7 +162,7 @@ class PluginHandle:
 - 服务后到自动启动。agent 声明依赖 tools，tools 未提供时签名是 `"uid:ver,-"`，句柄保持 pending；tools 出现后签名变成 `"uid:ver,uid:ver"`，环境重新检查依赖并启动 agent。
 - 提供者卸载自动退场。tools 提供者被卸载，第 03 章的 effect 机制自动注销服务，签名里的 tools 变回 `-`，agent 卸载自己回到 pending。
 
-依赖快照 `_store` 保存环境为插件解析出的服务，4.4 节的严格访问会从这里读取。
+依赖快照 `_store` 保存环境为插件解析出的服务，4.4 节的严格访问会从这里读取。`inject` 使用去重后的 tuple，而不是 set：依赖顺序稳定，epoch 也就不会因哈希顺序变化而抖动。
 
 ## 4.4 __getattr__：读服务必须先声明
 
@@ -167,7 +170,7 @@ Python 对象访问不存在的属性时，解释器会调用 `__getattr__`。�
 
 ```python
     def __getattr__(self, name: str) -> Any:
-        handle = self._current
+        handle = self._owner or self._root_context()._current
         if handle is not None:
             if name in handle._store:
                 return handle._store[name]
@@ -184,7 +187,7 @@ Python 对象访问不存在的属性时，解释器会调用 `__getattr__`。�
 2. 声明过但没就绪，报已声明依赖但尚未就绪，插件在 pending 期间误读服务时，这个错误能立刻指出问题所在；
 3. 根本没声明，报必须先 inject，即使服务明明存在。
 
-第三种结局正是依赖显式化的语法级体现：demo 时刻 3 里，`ctx.llm` 的服务明明在线上，直接读却报错。`__getattr__` 有一个工程代价：它只在普通属性查找失败时才被调用，且会干扰 `copy`、`pickle` 等依赖属性探测的库，官方 cordis 的 Proxy 同样有这类取舍，这是严格的代价。
+第三种结局正是依赖显式化的语法级体现：demo 时刻 3 里，`ctx.llm` 的服务明明在线上，直接读却报错。插件拿到的不是裸 root Context，而是绑定到自己 fiber 的 view；因此事件回调在安装函数返回后再次读取 `ctx.llm`，仍然会使用这个插件的 inject 与依赖快照。若只依赖全局 `_current`，安装结束后回调会丢失身份，正确声明过的服务也读不到。
 
 ## 4.5 waterfall
 
@@ -268,10 +271,12 @@ uv run python chapters/04-services-scopes/src/demo.py
   [agent] 当前状态: active      ← 依赖齐了，自动启动！
 
 === 时刻 2：提供者被卸载，依赖方自动卸载 ===
+  重名服务被拒绝: 服务 "tools" 已被注册
+  卸载 tools v1 后 [agent] 状态: pending
   [agent] 启动！llm={'provider': 'deepseek', 'model': 'deepseek-chat'} tools={'calculator': 'v2'}
-  [tools-provider-2] 重新提供 tools（版本+1）
-  重新 provide tools（版本+1）后 [agent] 状态: active
-  卸载 tools 提供者后 [agent] 状态: pending   ← 级联卸载
+  [tools-provider-2] 已提供 tools v2
+  注册 tools v2 后 [agent] 状态: active
+  卸载 tools v2 后 [agent] 状态: pending   ← 级联卸载
 
 === 时刻 3：读服务必须 inject ===
   报错: 读取服务 "llm" 前必须在 inject 里声明
@@ -284,12 +289,13 @@ uv run python chapters/04-services-scopes/src/demo.py
   最终结果: 计算结果: 42
 ```
 
-一个细节：时刻 2 里 agent 打印了两次启动，第二次是 tools-provider-2 用新版本重新提供 tools 时，agent 的依赖签名变化触发的热重载，先卸载旧状态、再用新服务重新启动。这正是 4.3 节签名里 `version` 字段的作用：不只感知有没有，还感知换没换。
+一个细节：时刻 2 不允许 v2 直接踩掉 v1。先卸载 v1 后，agent 回到 pending；随后注册 v2，新的 provider uid/version 改变依赖签名，agent 才用新快照重新启动。这样每个服务始终只有一个明确所有者，卸载旧 provider 也不会误删 v2。
 
 ## 本章小结
 
-- `provide` 与 `get`：服务表、版本号、提供者注销联动
+- `provide` 与 `get`：重名拒绝、精确注销、服务表与提供者生命周期联动
 - `inject` 与 `_recheck`：依赖签名、pending 等待、热重载、依赖卸载级联
+- fiber-bound Context view：回调在安装结束后仍按自己的 inject 读取服务
 - `__getattr__`：读服务必须先声明的语法级约束
 - `waterfall`：可拦截、可改写、返回值沿链回传
 - 作用域 isolate：教学版使用独立 Context 简化，第 14 章会实际使用
@@ -298,10 +304,10 @@ uv run python chapters/04-services-scopes/src/demo.py
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`vendor/cordis/src/reflect.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/vendor/cordis/src/reflect.ts) | `provide` 与 `_notify` | 官方 provide 在第 277 行，notify 在第 314 行；官方 notify 按名字过滤、按作用域隔离，教学版全量重算 |
-| [`vendor/cordis/src/fiber.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/vendor/cordis/src/fiber.ts) | `_recheck` | 官方依赖解析与 epoch 比较在 fiber.ts 内部，签名机制一致 |
-| [`vendor/cordis/src/context.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/vendor/cordis/src/context.ts) | `__getattr__` | 官方 Proxy 在第 74 行，reflect 的 get trap 在第 144 行报错 |
-| [`vendor/cordis/src/events.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/vendor/cordis/src/events.ts) | `waterfall` | 官方瀑布在第 234-238 行，用 `cbs.shift() ?? inner` 迭代实现，与我们递归等价 |
+| [`vendor/cordis/src/reflect.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/vendor/cordis/src/reflect.ts) | `provide` 与 `_notify` | 官方按名字和作用域通知受影响 fiber；教学版保持重名拒绝与所有权，但用全量重算简化 |
+| [`vendor/cordis/src/fiber.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/vendor/cordis/src/fiber.ts) | `_recheck` | 官方依赖解析与 epoch 比较在 fiber.ts 内部，签名机制一致 |
+| [`vendor/cordis/src/context.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/vendor/cordis/src/context.ts) | Context view / `__getattr__` | 官方 Proxy 把访问绑定到 fiber 与反射层；Python 版用 owner view 保留同样的调用身份 |
+| [`vendor/cordis/src/events.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/vendor/cordis/src/events.ts) | `waterfall` | 官方与教学版都让监听器按注册顺序包裹内层执行器 |
 
 ## 练习
 

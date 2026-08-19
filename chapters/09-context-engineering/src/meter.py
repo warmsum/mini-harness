@@ -1,7 +1,7 @@
 """第 09 章：Token 计量 —— 感知上下文压力。
 
 对应官方 packages/llm/token-meter。官方用一个固定启发式估算 token：
-每 token 按 4 个字符计，外加角色与结构开销（README.zh.md 第 9 行），
+每 token 按 4 个字符计，外加角色与结构开销，
 不引入真实 tokenizer。教学版复刻同一思路。
 """
 
@@ -79,7 +79,7 @@ class TokenMeter:
             }
             for m in messages
         ]
-        message_tokens = sum(item["tokens"] for item in metered)
+        message_tokens = sum(estimate_message(message) for message in messages)
         tools_tokens = estimate_tools(tools or [])
         return Measurement(
             messages=metered,

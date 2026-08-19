@@ -1,6 +1,6 @@
 """第 07 章：Inbox —— 两条待处理队列与领取原语。
 
-对应官方 core/agent-loop 文档第 58 行的 inbox 设计：
+对应官方 core/agent-loop 的 inbox 设计：
 - followup：追加到「下一轮」队列，并唤醒 Agent；
 - steer：追加到「下一步」队列——当前轮次内、下一次模型请求前生效。
 
@@ -31,21 +31,24 @@ class Inbox:
         """投递一条「下一步」消息（中途引导/纠正）。"""
         self._next_step.append(message)
 
-    def claim_turn(self) -> Message | None:
-        """轮次边界处领取：优先 next-turn，其次 next-step。
-        （步骤级输入也可能开新轮——比如上轮结束时恰好插队进来一条。）"""
+    def claim_turn(self) -> list[Message]:
+        """轮次边界：原子领取全部 next-step，再领取一条 next-turn。"""
+        claimed = list(self._next_step)
+        self._next_step.clear()
         if self._next_turn:
-            return self._next_turn.popleft()
-        if self._next_step:
-            return self._next_step.popleft()
-        return None
+            claimed.append(self._next_turn.popleft())
+        return claimed
 
-    def claim_step(self) -> Message | None:
-        """每个 step 开始前领取：只有 next-step 队列。"""
-        if self._next_step:
-            return self._next_step.popleft()
-        return None
+    def claim_step(self) -> list[Message]:
+        """步骤边界：一次领取当前全部 next-step 输入。"""
+        claimed = list(self._next_step)
+        self._next_step.clear()
+        return claimed
 
     @property
     def pending(self) -> int:
         return len(self._next_turn) + len(self._next_step)
+
+    @property
+    def has_next_step(self) -> bool:
+        return bool(self._next_step)

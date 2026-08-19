@@ -67,7 +67,7 @@ def main() -> None:
         Message(role="system", content="你是一个速算助手，直接给出答案。"),
         *probe.derive_messages(),
     ]:
-        print(f"  [{message.role}] {message.content[:40]}…")
+        print(f"  [{message.role}] {(message.content or '')[:40]}…")
     print("  ← 父 agent 的对话历史一个字都没进来")
 
     print()

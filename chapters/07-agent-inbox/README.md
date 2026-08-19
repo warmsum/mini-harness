@@ -48,23 +48,23 @@ class Inbox:
     def steer(self, message: Message) -> None:
         self._next_step.append(message)
 
-    def claim_turn(self) -> Message | None:
+    def claim_turn(self) -> list[Message]:
+        claimed = list(self._next_step)
+        self._next_step.clear()
         if self._next_turn:
-            return self._next_turn.popleft()
-        if self._next_step:
-            return self._next_step.popleft()
-        return None
+            claimed.append(self._next_turn.popleft())
+        return claimed
 
-    def claim_step(self) -> Message | None:
-        if self._next_step:
-            return self._next_step.popleft()
-        return None
+    def claim_step(self) -> list[Message]:
+        claimed = list(self._next_step)
+        self._next_step.clear()
+        return claimed
 ```
 
 三个细节：
 
 - `deque` 是标准库的双端队列，`popleft` 从头取，FIFO 顺序保证先到先处理。
-- `claim_turn` 顺带领 `_next_step`：步骤级输入也可能开新轮。上一轮结束时恰好插队进来的 steer，就是下一轮的起点。官方文档写明轮次边界处同时领取 next-step 输入和一条排队提示词，步骤之间只领取 next-step 输入，两个领取时机正是 followup 与 steer 语义差别的全部来源。
+- `claim_turn` 先原子领取全部 `_next_step`，再领取一条 `_next_turn`；steer 因此排在排队 prompt 之前。`claim_step` 也一次领取整个 next-step 批次，不会人为拆成多次模型调用。
 - 教学版的 `claim_step` 只领不检查唤醒。官方两条队列的投递都带唤醒语义，inject 是第三个别名，投递到 next-step 但不唤醒，留给练习 2。
 
 ## 7.3 Agent：常驻循环
@@ -93,13 +93,12 @@ class Agent:
         tools_by_name = {tool.name: tool for tool in tools}
 
         while self._inbox.pending > 0 and self._turn_no < max_turns:
-            message = self._inbox.claim_turn()
-            if message is None:
+            claimed = self._inbox.claim_turn()
+            if not claimed:
                 break
             self._turn_no += 1
             self._session.append("turn/start", {"turn": self._turn_no})
-            self._session.append("user/message", {"content": message.content})
-            self._run_turn(tools, tools_by_name)
+            self._run_turn(tools, tools_by_name, claimed)
             self._session.append(
                 "turn/end", {"turn": self._turn_no, "reason": "completed"}
             )
@@ -109,27 +108,25 @@ class Agent:
 主循环按固定顺序运行：领取一条消息、记录轮次开始、执行本轮、记录轮次结束，直到 inbox 清空。第 06 章的循环体移入 `_run_turn` 后，只增加了一个步骤：
 
 ```python
-    def _run_turn(self, tools, tools_by_name) -> None:
-        for _step in range(10):  # 安全阀：单轮最多 10 个 step
-            # 每个 step 开始前领 step 级输入：steer 在这里插队生效
-            if steer_message := self._inbox.claim_step():
-                self._session.append(
-                    "user/message",
-                    {"content": steer_message.content, "steered": True},
-                )
-
-            messages = [
-                Message(role="system", content=self._assembler.render(self._variables)),
-                *self._session.derive_messages(),
-            ]
-            # ...请求模型、执行工具（与第 06 章相同）
-            if not reply.tool_calls:
+    def _run_turn(self, tools, tools_by_name, claimed) -> None:
+        for step in range(1, 11):
+            if step > 1:
+                claimed = self._inbox.claim_step()
+            self._session.append("step/start", {"turn": self._turn_no, "step": step})
+            try:
+                for message in claimed:
+                    self._session.append("user/message", {"content": message.content})
+                # 记录 request/header，请求模型并执行工具
+                ...
+            finally:
+                self._session.append("step/end", {"turn": self._turn_no, "step": step})
+            if completed and not self._inbox.has_next_step:
                 return
 ```
 
-steer 消息被记录成一条打了标记的 user 消息，`steered: True`。下一个 step 请求模型时它自然出现在历史里，模型当场看到引导，本轮行为立刻修正。`steered` 标记进日志但不影响投影，纯粹给审计用。
+每个 step 都有明确边界。即使模型已经给出最终文本，只要请求期间又到了一批 steer，当前 turn 就继续下一个 step，而不是先结束 turn 再另开一轮。这一点是 steer“当前轮立即生效”的关键。
 
-教学版有两处简化，官方做法写在对照表里：官方 Agent 是常驻驱动器，空闲时挂起等待唤醒，教学版改成有消息就同步跑完；官方的终止条件是一个体系，completed、blocked、取消、错误各归各的，教学版只保留 completed 与 max_turns 安全阀。
+教学版仍是同步驱动器：有消息就跑到 inbox 暂时清空；官方会在空闲时挂起并由投递唤醒。官方还持久记录 inbox splice、取消、blocked、max-tokens 等完整终止原因，本章只保留完成、错误与 turn 数安全阀。
 
 ## 7.4 运行完整示例
 
@@ -185,11 +182,11 @@ uv run python chapters/07-agent-inbox/src/demo.py
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/core/agent-loop/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/core/agent-loop/README.zh.md) | 术语 | 官方 zh 文档第 5 行即以轮次、步骤命名 turn 与 step，本章沿用 |
-| 同上，第 58 行 | `Inbox` | 官方 `send()` 原语按 target × wakeup 路由，followup/steer/inject 是固定别名；followup 进 next-turn FIFO 并唤醒，steer 进 next-step inbox 并唤醒，inject 进 next-step 但不唤醒 |
-| 同上，第 56 行 | `Agent` | 官方 ReactLoopAgent 与 inbox 均为包内部实现，对外只暴露 send 原语，教学版直接暴露类 |
-| 同上，第 76 行 | `_run_turn` | 官方循环同样只做调用模型、运行工具、重复，其余全交给插件与事件 |
-| 同上，第 105 行 | 会话日志 | 官方已接纳的消息与工具调用记录并在后续步骤发送，与本章投影机制一致 |
+| [`packages/core/agent-loop/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/core/agent-loop/README.zh.md) | 术语 | 官方同样用 turn 表示一次唤醒到结束，用 step 表示一次模型调用与工具执行 |
+| 同上 | `Inbox` | 官方 `send()` 按 target × wakeup 路由；followup、steer、inject 分别表达下一轮、下一步唤醒和下一步静默注入 |
+| 同上 | `Agent` | 官方把 ReactLoopAgent 与 inbox 保持为包内实现，对外暴露 send 原语；教学版直接暴露类便于学习 |
+| 同上 | `_run_turn` | 核心循环只负责调用模型、运行工具和重复，其余行为由插件与事件组合 |
+| 同上 | 会话日志 | 已接纳消息、请求边界与工具调用写入日志，并用于后续 step 的请求重建 |
 
 ## 练习
 

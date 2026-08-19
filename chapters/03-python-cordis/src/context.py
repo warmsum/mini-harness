@@ -20,6 +20,20 @@ Disposer = Callable[[], None]
 PluginFn = Callable[["Context", Any], Disposer | None]
 
 
+def _once(disposer: Disposer) -> Disposer:
+    """把清理函数变成 single-shot：无论谁先调用，都只执行一次。"""
+    active = True
+
+    def run() -> None:
+        nonlocal active
+        if not active:
+            return
+        active = False
+        disposer()
+
+    return run
+
+
 class PluginHandle:
     """一次插件安装的句柄，记录这次安装的状态与全部资源。
 
@@ -64,11 +78,17 @@ class PluginHandle:
         try:
             result = self._plugin(self._ctx, self.config)
             if result is not None:
-                self._disposers.append(result)
+                self.collect(_once(result))
             self.state = "active"
         except Exception as error:
             self.state = "failed"
             self._error = error
+            try:
+                self._dispose_all()
+            except Exception as cleanup_error:
+                raise ExceptionGroup(
+                    "插件安装失败，回滚清理也失败", [error, cleanup_error]
+                ) from None
             raise
         finally:
             self._ctx._current = previous
@@ -81,10 +101,20 @@ class PluginHandle:
         """卸载：逆序执行全部清理函数（后注册的先清理）。"""
         if self.state == "disposed":
             return
-        for disposer in reversed(self._disposers):
-            disposer()
-        self._disposers.clear()
+        self._dispose_all()
         self.state = "disposed"
+
+    def _dispose_all(self) -> None:
+        disposers = list(reversed(self._disposers))
+        self._disposers.clear()
+        errors: list[Exception] = []
+        for disposer in disposers:
+            try:
+                disposer()
+            except Exception as error:
+                errors.append(error)
+        if errors:
+            raise ExceptionGroup("插件资源清理失败", errors)
 
 
 class Context:
@@ -115,7 +145,8 @@ class Context:
         effect 把两者绑在一起：谁创建谁负责交出清理方式，句柄负责在
         卸载时统一执行。
         """
-        disposer = fn()
+        raw_disposer = fn()
+        disposer = _once(raw_disposer) if raw_disposer is not None else None
         if disposer is not None and self._current is not None:
             self._current.collect(disposer)
         return disposer if disposer is not None else (lambda: None)
@@ -129,8 +160,12 @@ class Context:
         插件卸载时监听器自动解绑，不会留下「幽灵监听器」。"""
         self._listeners.setdefault(event, []).append(listener)
 
-        def remove() -> None:
-            self._listeners[event].remove(listener)
+        def remove_listener() -> None:
+            listeners = self._listeners.get(event)
+            if listeners is not None and listener in listeners:
+                listeners.remove(listener)
+
+        remove = _once(remove_listener)
 
         if self._current is not None:
             self._current.collect(remove)

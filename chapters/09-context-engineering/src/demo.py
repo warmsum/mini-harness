@@ -94,7 +94,7 @@ def main() -> None:
     print("=== ④ checkpoint 的真实内容（模型生成） ===")
     checkpoint = result.messages[1]
     print(f"  [role={checkpoint.role}]")
-    for line in checkpoint.content.splitlines()[:14]:
+    for line in (checkpoint.content or "").splitlines()[:14]:
         print(f"  {line}")
     print("  …")
 

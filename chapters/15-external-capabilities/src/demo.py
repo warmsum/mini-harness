@@ -5,7 +5,7 @@
 
 两节（都是真实网络调用）：
 ① Web Search：真实调用 DeepSeek Anthropic 兼容端点，服务器侧搜索，
-   打印结构化来源与模型回答；
+   只打印结构化来源，不信任提供方生成的自由文本；
 ② web_fetch：真实 HTTP GET DeepSeek Harness 的 GitHub 页面，
    提取标题与正文片段。
 """
@@ -23,11 +23,9 @@ def main() -> None:
     for source in result.sources:
         print(f"  - {source.title}")
         print(f"    {source.url}")
-    print()
-    print("  模型基于搜索结果的回答（节选）：")
-    for line in result.answer.splitlines()[:8]:
-        print(f"  {line}")
-    print("  …")
+        if source.snippet:
+            print(f"    {source.snippet[:120]}…")
+    print(f"  是否因 max_results 截断: {result.truncated}")
 
     print()
     print("=== ② web_fetch：真实抓取网页 ===")

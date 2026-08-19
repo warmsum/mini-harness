@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import httpx
 from httpx_sse import aconnect_sse
@@ -104,16 +106,17 @@ class DeepSeekClient:
             )
             response.raise_for_status()  # 网络/认证出错时抛出带状态码的异常
             data = response.json()
-            return data["choices"][0]["message"]["content"]
+            return cast(str, data["choices"][0]["message"]["content"])
 
     # ---------- 3.2 流式：边生成边产出 ----------
 
-    async def stream(self, messages: list[Message]):
+    async def stream(self, messages: list[Message]) -> AsyncIterator[str]:
         """流式调用：模型每想出一小段，就立即交出一小段（chunk）。
 
         这是一个「异步生成器」——调用方用 `async for` 遍历它，
         每迭代一次拿到一小段新文字，调用方立刻打印到终端。
         """
+        completed = False
         async with httpx.AsyncClient(timeout=60) as client:
             # aconnect_sse 帮我们解析 SSE 协议。
             # SSE 是服务端持续推送数据的文本协议：每条数据以 "data: ..." 开头。
@@ -133,12 +136,15 @@ class DeepSeekClient:
             ) as event_source:
                 async for event in event_source.aiter_sse():
                     if event.data == "[DONE]":
+                        completed = True
                         break  # DeepSeek 用这一行表示「全部说完了」
                     payload = json.loads(event.data)
                     delta = payload["choices"][0].get("delta", {})
                     piece = delta.get("content")
                     if piece:
                         yield piece  # 把这一小段文字交给调用方
+        if not completed:
+            raise RuntimeError("流式响应在 [DONE] 之前中断，拒绝保存不完整消息")
 
     # ---------- 3.3 组装：把分片拼成一条完整消息 ----------
 

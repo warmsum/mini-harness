@@ -7,7 +7,7 @@
 1. 模式门：什么模式下能执行什么样的命令，第 10 章沙箱模式的命令版；
 2. 审批：模式放行了还不够，真正执行前要过人这一关。官方把这叫 approval，策略分 ask 与 never，问一下与直接拒。
 
-本章实现命令执行器与审批决策链，并如实交代官方与教学版的一处关键差异：官方的 bash-sandbox 用内核级隔离，macOS seatbelt、Linux landlock，把命令的文件写效应挡在系统调用层；教学版不实现内核沙箱，只实现决策层。官方文档第 85 行把这句边界写得很清楚：限制只覆盖文件影响，这些模式不是通用安全沙箱。
+本章实现命令执行器与审批决策链，并如实交代官方与教学版的一处关键差异：官方的 bash-sandbox 用内核级隔离，macOS seatbelt、Linux landlock，把命令的文件写效应挡在系统调用层；教学版不实现内核沙箱，只实现决策层。即使是官方沙箱，限制也只覆盖文件影响，并不是通用安全沙箱。
 
 ## 学习目标
 
@@ -37,11 +37,18 @@ class CommandResult:
     timed_out: bool = False
 
 
-def run_command(command: str, cwd: str, timeout_seconds: float = 30.0) -> CommandResult:
+def run_command(
+    command: str,
+    cwd: str,
+    timeout_seconds: float = 30.0,
+    *,
+    use_shell: bool = True,
+) -> CommandResult:
     try:
+        argv = command if use_shell else shlex.split(command)
         completed = subprocess.run(
-            command,
-            shell=True,
+            argv,
+            shell=use_shell,
             cwd=cwd,
             capture_output=True,
             text=True,
@@ -61,11 +68,13 @@ def run_command(command: str, cwd: str, timeout_seconds: float = 30.0) -> Comman
         )
 ```
 
-三个参数的用意：
+几个关键参数的用意：
 
-- `shell=True` 按 shell 语法解析，管道、重定向、&& 都能用，开发任务离不开这些。
+- `use_shell=True` 按 shell 语法解析，管道、重定向、`&&` 都能用；`False` 时先用 `shlex.split` 拆成参数列表，完全绕过 shell 语法。
 - `cwd` 决定命令在哪个目录执行。Agent 的命令必须落在工作区内执行，第 10 章的 workspace 概念延续，这是执行上下文的最基本约束。
 - `timeout` 是硬终止，不是通知一下，是直接杀掉进程。超时不抛异常让调用方崩溃，而是变成一条正常结果，exit_code 为 −1 加标记。对 Agent 来说，命令超时了是给模型看的事实，不是程序的崩溃。
+
+为什么还要提供 `use_shell=False`？因为文本白名单只能识别第一条命令。假如把 `ls; rm file` 交给 shell，第一词看起来是只读的 `ls`，后半句却会删除文件。因此，本章对 read-only 白名单命令关闭 shell 解析；只有经过更宽模式和审批的命令才使用完整 shell 语法。
 
 ## 11.3 决策链：票据、模式门、审批
 
@@ -78,11 +87,15 @@ def run_command(command: str, cwd: str, timeout_seconds: float = 30.0) -> Comman
             self._granted_once = None
             return True, "allowed-once（一次性授权）"
 
-        first_word = command.strip().split()[0] if command.strip() else ""
+        try:
+            words = shlex.split(command)
+        except ValueError as error:
+            return False, f"[sandbox] 无法解析命令: {error}"
+        first_word = words[0] if words else ""
 
         # 2) 模式门
         if self.mode == "read-only":
-            if any(first_word.startswith(prefix) for prefix in READ_ONLY_PREFIXES):
+            if first_word in READ_ONLY_COMMANDS:
                 return True, "read-only 白名单放行"
             return False, f"[sandbox] read-only 模式拒绝写类/未知命令: {command}"
 
@@ -99,7 +112,7 @@ def run_command(command: str, cwd: str, timeout_seconds: float = 30.0) -> Comman
 
 一次性授权优先。`grant_once(command)` 签发的授权可以绕过模式门与审批，但只对完全相同的一条命令生效，使用一次后立即失效。它对应官方 sandbox_permissions 的升级流程：模型在 read-only 模式请求执行写命令，用户批准后只放行当前动作，后续写命令仍需重新判断。官方词汇表同样使用 allowed-once，而不是 allow-always。
 
-模式检查发生在审批之前。read-only 模式下，白名单中的只读命令直接放行，避免每次都请求用户确认；其他命令直接拒绝。这里的白名单只是教学近似，真实内核沙箱按系统调用产生的实际影响拦截，不依赖可能被伪装的命令文本。
+模式检查发生在审批之前。read-only 模式下，白名单只做精确命令名匹配：`grep` 可以，`grep-and-delete` 不可以。放行后还会以 `shell=False` 执行，分号、管道和重定向只会成为普通参数，不能偷偷追加第二条命令。这里的白名单仍然只是教学近似，真实内核沙箱按系统调用产生的实际影响拦截，不依赖命令文本。
 
 审批遵循 fail closed。never 策略直接拒绝；ask 策略调用审批回调，只有 allowed-once 放行，其余三种结果全部拒绝。审批通道不可用时，Agent 停止当前动作，而不是绕过检查继续执行。官方说明，无头或组合不完整的部署会返回 unavailable，并按拒绝处理。
 
@@ -141,8 +154,9 @@ precious.txt
 
 ## 本章小结
 
-- `run_command`：subprocess 三件套，shell、cwd、timeout，超时转结构化结果
+- `run_command`：subprocess、cwd、timeout 与可选 shell 解析，超时转结构化结果
 - `ShellPolicy.decide`：票据、模式门、审批的三段决策链
+- read-only 白名单使用精确命令名和 `shell=False`，拒绝命令拼接绕过
 - 审批四结果语义：allowed-once 唯一放行、fail closed
 - 实现边界：教学版不包含内核隔离，官方 bash-sandbox 使用 seatbelt 与 landlock
 
@@ -150,9 +164,9 @@ precious.txt
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/shell/bash-sandbox/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/shell/bash-sandbox/README.zh.md) | `ShellPolicy` | danger-full-access 不作限制在第 15 行；只限制文件影响、不是通用安全沙箱在第 85 行；教学版不实现内核隔离 |
-| [`packages/interaction/user-approval/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/interaction/user-approval/README.zh.md) | 审批链 | 四结果与一次性授权在第 5 行；ask 与 never 策略在第 11 行；无内置应答者 fail closed 在第 62 行 |
-| [`packages/guard/timeout-policy/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/guard/timeout-policy/README.zh.md) | `timeout` | 官方超时是协作式，只在 exec.signal 上通知（第 5、32 行），教学版用 subprocess 硬超时 |
+| [`packages/shell/bash-sandbox/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/shell/bash-sandbox/README.zh.md) | `ShellPolicy` | 官方支持 danger-full-access，并明确沙箱只限制文件影响；教学版不实现内核隔离 |
+| [`packages/interaction/user-approval/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/interaction/user-approval/README.zh.md) | 审批链 | 官方定义四种审批结果、ask/never 策略和 fail closed；教学版保留同样的决策语义 |
+| [`packages/guard/timeout-policy/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/guard/timeout-policy/README.zh.md) | `timeout` | 官方通过 `exec.signal` 协作式通知超时，教学版使用 subprocess 硬超时 |
 
 ## 练习
 

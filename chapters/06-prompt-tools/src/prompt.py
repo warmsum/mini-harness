@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -30,26 +32,37 @@ class PromptAssembler:
 
     def __init__(self) -> None:
         self._sections: list[PromptSection] = []
+        self._variables: dict[str, Callable[[], str]] = {}
 
     def section(self, name: str, text: str, order: int = 0) -> None:
-        """贡献一段提示词。同名段重复贡献时后到者覆盖先到者
-        （对应官方「同层重复名称抛出」的简化：教学版后者胜）。"""
-        self._sections = [s for s in self._sections if s.name != name]
+        """贡献一段提示词。同一层的同名段会立即拒绝。"""
+        if any(section.name == name for section in self._sections):
+            raise ValueError(f'提示词段 "{name}" 已被注册')
         self._sections.append(PromptSection(order=order, name=name, text=text))
+
+    def variable(self, name: str, provider: Callable[[], str]) -> None:
+        """注册运行时变量；provider 在每次 render 时重新求值。"""
+        if name in self._variables:
+            raise ValueError(f'提示词变量 "{name}" 已被注册')
+        self._variables[name] = provider
 
     def render(self, variables: dict[str, str] | None = None) -> str:
         """按 order 排序拼接全部段，并替换 {{变量}} 占位符。
 
-        变量机制（对应官方 `ctx.systemPrompt.variable`，core/system-prompt
-        文档第 24 行）的用途：提示词里需要运行时才知道的值——模型名、
+        variable provider 的用途：提示词里需要运行时才知道的值——模型名、
         当前目录、日期。段文本写 {{model}}，组装时用真实值替换。
         """
-        ordered = sorted(self._sections, key=lambda s: (s.order, s.name))
+        ordered = sorted(self._sections, key=lambda s: s.order)
         text = "\n\n".join(section.text for section in ordered)
-        for name, value in (variables or {}).items():
+        resolved = {name: provider() for name, provider in self._variables.items()}
+        resolved.update(variables or {})
+        for name, value in resolved.items():
             text = text.replace("{{" + name + "}}", value)
+        unresolved = sorted(set(re.findall(r"{{([a-zA-Z_][a-zA-Z0-9_]*)}}", text)))
+        if unresolved:
+            raise KeyError(f"未注册的提示词变量: {', '.join(unresolved)}")
         return text
 
     @property
-    def sections(self) -> list[PromptSection]:
-        return sorted(self._sections, key=lambda s: (s.order, s.name))
+    def sections(self) -> tuple[PromptSection, ...]:
+        return tuple(sorted(self._sections, key=lambda s: s.order))

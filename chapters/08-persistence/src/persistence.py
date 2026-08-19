@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 from session import Session, SessionEvent
@@ -26,36 +27,36 @@ class JsonlStore:
         self.path = Path(path)
 
     # ------------------------------------------------------------------
-    # 保存：原子发布
+    # 保存：首次原子发布，之后只追加
     # ------------------------------------------------------------------
 
     def save(self, session: Session) -> None:
-        """把会话全部事件写成 JSONL 文件。
+        """首次用临时文件原子发布，之后只追加尚未落盘的事件。"""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.path.exists():
+            lines = [_header_line(), *(_event_line(event) for event in session.events)]
+            tmp_path = self.path.with_name(self.path.name + ".tmp")
+            with tmp_path.open("w", encoding="utf-8") as file:
+                file.write("\n".join(lines) + "\n")
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(tmp_path, self.path)
+            return
 
-        原子发布的关键：先写临时文件，写完再 os.replace 换名。
-        os.replace 在同一文件系统内是原子操作——任何时刻打开目标
-        路径，看到的要么是完整的旧文件、要么是完整的新文件，
-        绝不存在写了一半的状态。（官方文档第 43 行用硬链接无覆盖
-        发布 + fsync 达成同样效果，教学版用 os.replace 的等价语义。）
-        """
-        lines = [
-            json.dumps({"format": HEADER_FORMAT, "version": HEADER_VERSION}, ensure_ascii=False)
-        ]
-        for event in session.events:
-            lines.append(
-                json.dumps(
-                    {
-                        "id": event.id,
-                        "type": event.type,
-                        "ts": event.ts,
-                        "data": event.data,
-                    },
-                    ensure_ascii=False,
-                )
-            )
-        tmp_path = self.path.with_name(self.path.name + ".tmp")
-        tmp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        os.replace(tmp_path, self.path)
+        persisted, torn_offset = self._read_records()
+        if torn_offset is not None:
+            raise ValueError("会话文件存在残缺尾行；请先 load() 修复后再保存")
+        current = session.events
+        if len(persisted) > len(current) or tuple(persisted) != current[: len(persisted)]:
+            raise ValueError("会话文件不是当前日志的前缀，拒绝覆盖既有历史")
+        pending = current[len(persisted) :]
+        if not pending:
+            return
+        with self.path.open("a", encoding="utf-8") as file:
+            for event in pending:
+                file.write(_event_line(event) + "\n")
+            file.flush()
+            os.fsync(file.fileno())
 
     # ------------------------------------------------------------------
     # 加载：校验 + 崩溃修复
@@ -73,32 +74,119 @@ class JsonlStore:
         if not self.path.exists():
             raise FileNotFoundError(f"会话文件不存在: {self.path}")
 
-        lines = self.path.read_text(encoding="utf-8").splitlines()
-        header = json.loads(lines[0])
-        if (
-            header.get("format") != HEADER_FORMAT
-            or header.get("version") != HEADER_VERSION
-        ):
+        events, torn_offset = self._read_records()
+        if torn_offset is not None:
+            with self.path.open("r+b") as file:
+                file.truncate(torn_offset)
+            _append_recovery_closers(events)
+        return Session.from_log(events)
+
+    def _read_records(self) -> tuple[list[SessionEvent], int | None]:
+        """读取完整行。只有最后一个未换行片段可以按崩溃尾部修复。"""
+        raw_bytes = self.path.read_bytes()
+        if not raw_bytes:
+            raise ValueError("空的会话文件")
+        complete_bytes = len(raw_bytes)
+        torn_offset: int | None = None
+        if not raw_bytes.endswith(b"\n"):
+            last_newline = raw_bytes.rfind(b"\n")
+            if last_newline < 0:
+                raise ValueError("会话文件缺少完整 header")
+            complete_bytes = last_newline + 1
+            torn_offset = complete_bytes
+
+        complete_lines = raw_bytes[:complete_bytes].decode("utf-8").splitlines()
+        if not complete_lines:
+            raise ValueError("会话文件缺少 header")
+        try:
+            header = json.loads(complete_lines[0])
+        except json.JSONDecodeError as error:
+            raise ValueError("会话文件 header 不是合法 JSON") from error
+        if not isinstance(header, dict) or set(header) != {"format", "version"}:
+            raise ValueError(f"无法识别的会话文件头: {header}")
+        if header["format"] != HEADER_FORMAT or header["version"] != HEADER_VERSION:
             raise ValueError(f"无法识别的会话文件头: {header}")
 
         events: list[SessionEvent] = []
-        for line in lines[1:]:
+        for line_number, line in enumerate(complete_lines[1:], start=2):
             try:
                 raw = json.loads(line)
-            except json.JSONDecodeError:
-                # 残缺尾行：截断 + 合成收尾，之后的行全部忽略
-                events.append(
-                    SessionEvent(
-                        id=len(events),
-                        type="turn/end",
-                        ts=0.0,
-                        data={"turn": 0, "reason": "crashed"},
-                    )
-                )
-                break
+            except json.JSONDecodeError as error:
+                raise ValueError(f"会话文件第 {line_number} 行损坏") from error
+            if not isinstance(raw, dict) or set(raw) != {"id", "type", "ts", "data"}:
+                raise ValueError(f"会话文件第 {line_number} 行不是合法事件")
             events.append(
                 SessionEvent(
                     id=raw["id"], type=raw["type"], ts=raw["ts"], data=raw["data"]
                 )
             )
-        return Session.from_log(events)
+        # 先走 Session 的连续 seq 与 lossless JSON 校验，再交还普通列表。
+        return list(Session.from_log(events).events), torn_offset
+
+
+def _header_line() -> str:
+    return json.dumps(
+        {"format": HEADER_FORMAT, "version": HEADER_VERSION}, ensure_ascii=False
+    )
+
+
+def _event_line(event: SessionEvent) -> str:
+    return json.dumps(
+        {"id": event.id, "type": event.type, "ts": event.ts, "data": event.data},
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def _append_recovery_closers(events: list[SessionEvent]) -> None:
+    """为开放的工具、step 与 turn 依次补上崩溃收尾。"""
+    open_turn: int | None = None
+    open_step: tuple[int, int] | None = None
+    open_calls: dict[str, str] = {}
+    for event in events:
+        if event.type == "turn/start":
+            open_turn = event.data["turn"]
+        elif event.type == "turn/end":
+            open_turn = None
+        elif event.type == "step/start":
+            open_step = (event.data["turn"], event.data["step"])
+        elif event.type == "step/end":
+            open_step = None
+        elif event.type == "tool/call":
+            open_calls[event.data["call_id"]] = event.data["name"]
+        elif event.type == "tool/result":
+            open_calls.pop(event.data["call_id"], None)
+
+    timestamp = events[-1].ts if events else time.time()
+    for call_id, name in open_calls.items():
+        events.append(
+            SessionEvent(
+                id=len(events),
+                type="tool/result",
+                ts=timestamp,
+                data={
+                    "call_id": call_id,
+                    "content": f"Error: 工具 {name!r} 因进程崩溃而中断",
+                    "is_error": True,
+                },
+            )
+        )
+    if open_step is not None:
+        turn, step = open_step
+        events.append(
+            SessionEvent(
+                id=len(events),
+                type="step/end",
+                ts=timestamp,
+                data={"turn": turn, "step": step, "reason": "crashed"},
+            )
+        )
+    if open_turn is not None:
+        events.append(
+            SessionEvent(
+                id=len(events),
+                type="turn/end",
+                ts=timestamp,
+                data={"turn": open_turn, "reason": "crashed"},
+            )
+        )

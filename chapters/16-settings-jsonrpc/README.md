@@ -7,61 +7,72 @@
 1. 配置：这些外部入口和 Agent 本体怎么共享同一套配置，不互相矛盾？
 2. RPC：进程之间的调用语言长什么样，错误怎么表达？
 
-官方把第二个主题做成了 Typert RPC 网关，api/gateway 文档第 5 行写明：为 Host 与 Client 两侧的 Cordis 环境提供 Typert RPC endpoint。教学版实现它的协议近亲 JSON-RPC 2.0，一个只有几页规范的极简标准，足够讲清跨进程调用的全部核心问题。
+官方把第二个主题做成了 Typert RPC 网关，为 Host 与 Client 两侧的 Cordis 环境提供 endpoint。教学版实现它的协议近亲 JSON-RPC 2.0，一个很小的标准，足够讲清跨进程调用的核心问题。
 
 ## 学习目标
 
 完成本章后，你将能够：
 
-- 按“显式覆盖、`.env`、默认值”的优先级解析配置；
+- 按 namespace 注册配置，并按“schema 默认值、组合 base、用户文档”解析；
+- 使用深度不可变快照、revision 和 Compare-and-Swap 防止配置被误改或覆盖；
 - 读懂 JSON-RPC 2.0 的请求、成功响应和错误响应；
 - 实现请求解析、方法注册与分发；
 - 把不可信输入转换成结构化协议错误，而不是让服务进程退出。
 
-## 16.1 原理：配置为什么必须分层
+## 16.1 原理：配置为什么要分 namespace 和层
 
-如果代码默认值、`.env` 和命令行参数同时提供同一个配置项，就必须规定哪个来源生效。分层配置为每个来源定义明确的优先级：
+真实 Harness 由很多插件组成。模型插件可能有 `model`，搜索插件也可能有 `model`；如果所有键都塞进一个大字典，重名和归属很快变得混乱。官方让每个插件注册自己的 namespace，例如 `agent`、`web-search-deepseek`，然后在该分节内部做三层解析：
 
 ```
-显式覆盖（程序调用方传入）  >  .env 文件  >  默认值（代码内置）
+schema defaults  <  composition base  <  user document
 ```
 
-- 默认值兜底：新用户零配置就能跑，默认值要选大多数情况下正确的那个；
-- .env 覆盖：本地个性化，API Key 属于这一类，文件被 gitignore，不进版本库；
-- 显式覆盖：调用方，比如 RPC 请求，带着明确意图传入，最高优先。
+- schema defaults 是插件自带的默认值，让零配置也有合理行为；
+- composition base 是当前 profile/组装给该插件的基础配置；
+- user document 是用户真正保存的覆盖层，优先级最高。
 
-读配置永远按这个顺序逐级回落，任何时刻这个配置项的值是什么只有一个答案。官方 settings 服务同样是分层解析：schema 默认值，然后组合的 base，最后用户文档分节。
+三层采用深合并。用户只改 `agent.model` 时，不会把 base 中的 `max_steps` 一并抹掉。`replace({})` 则是刻意重置用户分节，让值重新继承 base 与 defaults。
 
-## 16.2 Settings：三层逐级回落
+## 16.2 Settings：注册、读取和安全写入
 
 ```python
 class Settings:
-    def __init__(self, env_path=None, defaults=None, overrides=None):
-        self._defaults = dict(defaults or {})
-        self._env: dict[str, str] = {}
-        self._overrides = dict(overrides or {})
-        if env_path is not None and env_path.exists():
-            self._load_env(env_path)
+    def register(self, namespace, *, defaults=None, base=None, validate=None):
+        if namespace in self._registrations:
+            raise ValueError(f'namespace "{namespace}" 已注册')
+        # 保存三层信息，并先验证当前解析值
+        ...
+        return SettingsScope(self, namespace)
 
-    def get(self, key: str, default: str | None = None) -> str | None:
-        if key in self._overrides:
-            return self._overrides[key]
-        if key in self._env:
-            return self._env[key]
-        if key in self._defaults:
-            return self._defaults[key]
-        return default
+    def get(self, namespace):
+        return _freeze(self._resolved(namespace))
+
+    def _resolved(self, namespace):
+        registration = self._require(namespace)
+        return _merge(
+            _merge(registration.defaults, registration.base),
+            self._user_section(namespace),
+        )
 ```
 
-三类来源分别保存，`get` 按优先级依次查找。`_load_env` 的解析规则与第 01 章 `load_api_key` 相同：跳过注释和空行，并移除值两端的引号。
+注册时会拒绝非法或重复 namespace；已有用户分节若过不了 validator，注册本身也失败。`get()` 返回深度不可变、与内部状态脱离的快照：外部不能改字典，嵌套 list 也被冻结为 tuple。
+
+写入有两种形态：
+
+- `update(patch)`：把 patch 深合并进用户分节；
+- `replace(section)`：整体替换用户分节。
+
+每个 namespace 有独立的单调 revision。配置 UI 先读到 revision 4，准备保存时别人已经写到 revision 5，那么带 `expected_revision=4` 的写入会抛出 `SettingsConflictError(code="SETTINGS_CONFLICT")`，而不是覆盖新值。这就是第 13 章 GoalRef 同一种 Compare-and-Swap 思路。
+
+写入前还会做 lossless JSON 校验：拒绝循环引用、非字符串键、NaN/Infinity、负零、超出 JSON 安全范围的整数以及非 JSON 类型。`watch()` 返回幂等 disposer，解析值真正变化时回调收到 `(next, prev)`。
 
 ## 16.3 JSON-RPC 2.0：跨进程调用的最小语言
 
 进程 A 调用进程 B 的方法时，进程间传输的是文本。JSON-RPC 2.0 使用请求与响应两类 JSON 消息描述这次调用：
 
 ```json
-{ "jsonrpc": "2.0", "id": 1, "method": "settings.get", "params": {"key": "MODEL"} }
-{ "jsonrpc": "2.0", "id": 1, "result": "deepseek-chat" }
+{ "jsonrpc": "2.0", "id": 1, "method": "settings.get", "params": {"namespace": "agent"} }
+{ "jsonrpc": "2.0", "id": 1, "result": {"model": "deepseek-chat"} }
 ```
 
 - 请求：method 要调什么、params 传什么、id 是本次调用的编号，响应原样带回，异步时对得上号；
@@ -128,15 +139,15 @@ uv run python chapters/16-settings-jsonrpc/src/demo.py
 完整输出，本地确定性运行：
 
 ```
-=== ① 分层配置 ===
-  MODEL（.env 覆盖默认）: deepseek-chat
-  MAX_TURNS（只有默认值）: 10
-  DEEPSEEK_API_KEY（只有 .env）: sk-local-test
-  MODEL（显式覆盖后）: deepseek-v4-max
+=== ① namespace + 三层配置 + revision ===
+  解析值: {'model': 'deepseek-chat', 'max_steps': 20}
+  ← 默认 model 被用户层覆盖，默认 max_steps 被 base 层覆盖
+  更新后: {'model': 'deepseek-v4-max', 'max_steps': 20}，revision=1
+  陈旧写入被拒绝: [SETTINGS_CONFLICT] settings namespace "agent" 已变化（期望 revision 0，当前 1）
 
 === ② JSON-RPC 线格式往返 ===
-  → {"jsonrpc": "2.0", "id": 1, "method": "settings.get", "params": {"key": "MODEL"}}
-  ← {"jsonrpc": "2.0", "id": 1, "result": "deepseek-v4-max"}
+  → {"jsonrpc": "2.0", "id": 1, "method": "settings.get", "params": {"namespace": "agent"}}
+  ← {"jsonrpc": "2.0", "id": 1, "result": {"model": "deepseek-v4-max", "max_steps": 20}}
   → {"jsonrpc": "2.0", "id": 2, "method": "echo", "params": {"text": "你好"}}
   ← {"jsonrpc": "2.0", "id": 2, "result": "你好"}
   → {"jsonrpc": "2.0", "id": 3, "method": "unknown.tool", "params": {}}
@@ -149,11 +160,12 @@ uv run python chapters/16-settings-jsonrpc/src/demo.py
   ← {"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": "Parse error: 不是合法 JSON"}}
 ```
 
-六条请求各演示一条路径：正常取值、正常回声、未知方法、参数类型错误、缺协议版本、彻底不是 JSON。每一条都得到结构化响应，包括最后两条垃圾输入。
+六条请求各演示一条路径：正常读取 namespace、正常回声、未知方法、参数类型错误、缺协议版本、彻底不是 JSON。每一条都得到结构化响应，包括最后两条垃圾输入。
 
 ## 本章小结
 
-- `Settings`：显式覆盖、.env、默认值的三层回落
+- `Settings`：namespace 注册，以及 defaults < base < user 的三层深合并
+- 安全写入：不可变快照、lossless JSON、update/replace、revision 冲突与 watch
 - `parse_request`：JSON-RPC 2.0 线格式校验，失败即结构化错误
 - `RpcDispatcher`：注册、路由、三层防御
 - 标准错误码五件套
@@ -162,14 +174,14 @@ uv run python chapters/16-settings-jsonrpc/src/demo.py
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/api/gateway/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/api/gateway/README.zh.md) | `RpcDispatcher` | 官方 Typert RPC endpoint 在第 5 行；invoke 校验参数、调用业务方法并校验结果在第 9 行，思想与本章一致，协议换成更简单的 JSON-RPC |
-| [`packages/settings/settings/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/settings/settings/README.zh.md) | `Settings` | 官方分层解析在默认值、base、用户文档三层（第 5 行）；官方还有 schema 校验与 describe 脱敏机密值（第 12 行），教学版只做三层回落 |
+| [`packages/api/gateway/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/api/gateway/README.zh.md) | `RpcDispatcher` | 官方 Typert endpoint 会按 descriptor 校验具名参数和返回值；教学版用更小的 JSON-RPC 运行时校验说明协议边界 |
+| [`packages/settings/settings/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/settings/settings/README.zh.md) | `Settings` | 对齐 namespace、三层解析、深冻结快照、update/replace、revision 冲突和 JSON 校验 |
 
-官方用 Typert 而非 JSON-RPC 的动机：方法签名由 TypeScript 类型生成，两端共享同一份描述符，参数校验在编译期就锁死，比运行时手写校验更不容易出错。教学版用 JSON-RPC 是为了把跨进程调用的核心问题，线格式、错误表达、信任边界，用最小面积讲清。
+官方还支持 `mutate` 路径操作、secret 脱敏描述、异步顺序 watcher、可写 provider、文件热重载和卸载排空；教学版不实现这些工程能力。官方用 Typert 而非 JSON-RPC：两端共享方法 descriptor，参数和返回值都由 schema 校验。教学版的手写 JSON-RPC 只是用最小面积讲清线格式、错误表达和信任边界，不与 Typert wire 兼容。
 
 ## 练习
 
-1. **优先级验证。** 把 demo 里的显式覆盖删掉，重跑，观察 MODEL 回落到 .env 值；再删掉 .env 里的 MODEL，观察回落到默认值。
+1. **优先级验证。** 删除 demo 的用户层 `model`，观察它回落到默认值；再在 base 中加入 `model`，确认 base 覆盖 defaults、user 又覆盖 base。
 2. **通知语义。** JSON-RPC 2.0 规定 id 为 null 的请求是通知，无需响应。给 dispatcher 加这个规则：id 为 null 时执行但不返回响应，并讨论它的适用场景，心跳、日志上报。
 3. **批量请求。** JSON-RPC 2.0 支持数组形式的批量请求，一次发多条，一次回多条。实现 dispatch_batch，单条失败不影响其他条。
 4. **错误即数据。** 把 demo 的六条往返看成协议测试用例，为每一对请求与预期响应写一个断言，体会结构化错误对自动化测试的友好，无需解析文本就能断言错误码。

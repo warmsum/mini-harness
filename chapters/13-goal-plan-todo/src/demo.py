@@ -45,7 +45,7 @@ def main() -> None:
     store.admit_round()  # 模拟一轮目标工作完成
     print("  admit_round → ")
     show_goal(store)
-    ref = store.get_ref()  # 轮次推进后旧引用已失效，重新取引用
+    ref = store.get_ref()  # admit_round 不推进 revision；取回当前引用便于继续演示
 
     ref = store.pause(ref)
     print("  pause → ")
@@ -79,14 +79,29 @@ def main() -> None:
     for event in session.events:
         if event.type == "goal/change":
             data = event.data
-            print(f"  #{event.id:<2} goal/change r{data['revision']} [{data['phase']}]")
+            if data["operation"] == "clear":
+                print(f"  #{event.id:<2} goal/change clear")
+            else:
+                goal = data["goal"]
+                print(
+                    f"  #{event.id:<2} goal/change {data['operation']} "
+                    f"r{goal['revision']} [{goal['phase']}]"
+                )
     replayed = GoalStore.replay(session)
     current = replayed.get()
+    assert current is not None
     print(f"  回放后的当前目标: r{current.revision} [{current.phase}]")
     print("  ← 目标状态只由事件派生：日志是唯一持久权威")
 
     section("④ todo：整体替换与校验")
-    print("  " + todo_write(session, [TodoItem("写第 01 章", STATUS_IN_PROGRESS)]))
+    print(
+        "  "
+        + todo_write(
+            session,
+            [TodoItem("写第 01 章", STATUS_IN_PROGRESS)],
+            allow_parallel_in_progress=False,
+        )
+    )
     print(
         "  "
         + todo_write(
@@ -95,10 +110,25 @@ def main() -> None:
                 TodoItem("写第 01 章", STATUS_IN_PROGRESS),
                 TodoItem("写第 02 章", "pending"),
             ],
+            allow_parallel_in_progress=False,
         )
     )
-    print("  " + todo_write(session, [TodoItem("写第 01 章", "pending"), TodoItem("写第 01 章", "pending")]))
-    print("  " + todo_write(session, [TodoItem("写第 01 章", "doing")]))
+    print(
+        "  "
+        + todo_write(
+            session,
+            [TodoItem("写第 01 章", "pending"), TodoItem("写第 01 章", "pending")],
+            allow_parallel_in_progress=False,
+        )
+    )
+    print(
+        "  "
+        + todo_write(
+            session,
+            [TodoItem("写第 01 章", "doing")],
+            allow_parallel_in_progress=False,
+        )
+    )
 
 
 if __name__ == "__main__":

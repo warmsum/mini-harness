@@ -54,7 +54,7 @@ def main() -> None:
         registry=registry,
         assembler=assembler,
         user_prompt="1+2*3 等于几？",
-        max_turns=10,
+        max_steps=10,
         variables={"name": "小算"},
     )
     for message in session.derive_messages():

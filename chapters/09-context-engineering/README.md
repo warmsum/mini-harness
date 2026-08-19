@@ -101,7 +101,7 @@ def build_summary_prompt(messages: list[Message], tail_start: int) -> list[Messa
     ]
 ```
 
-输入等于 system 原文、被压缩区原文、一条固定的压缩指令。压缩指令是官方写好的长提示词，本章代码逐字复刻，原文在官方 compaction-basic 文档第 113 行起。它要求模型输出一个固定的 Markdown 结构：任务意图、技术概念、文件与代码、错误与修复、待办、当前进度、下一步、关键上下文，八个小节，把对话的骨架提取出来。
+输入等于 system 原文、被压缩区原文、一条固定的压缩指令。本章代码保留官方 compaction-basic 的提示结构，要求模型输出任务意图、技术概念、文件与代码、错误与修复、待办、当前进度、下一步、关键上下文八个小节，把对话骨架提取出来。
 
 这种输入结构还可以复用 KV cache。模型服务通常会缓存请求前缀的计算结果；连续请求具有相同前缀时，后一次请求可以复用已有计算。压缩调用先重放 system 和被压缩区原文，再追加压缩指令，这一前缀与正常请求中的对应部分逐字相同。官方文档明确说明，该结构用于复用服务商的热前缀 cache。教学版保留相同的重放顺序。
 
@@ -207,14 +207,14 @@ demo 用一个缩小的上下文窗口（4000 token，教学用）让压力容�
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/llm/token-meter/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/llm/token-meter/README.zh.md) | `TokenMeter` | 4 字符/token 启发式在第 9 行；官方还能复用提供方真实用量、跟踪 projectedTokens（第 32 行），教学版只保留启发式 |
-| 同上，第 53 行 | 解耦 | 官方 meter 保持与模型路由和压缩无关，压力判定留给消费方 |
-| [`packages/compaction/compaction-basic/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/compaction/compaction-basic/README.zh.md) | `compact` | thresholdRatio 0.8 在第 32 行，retainRatio 0.16 在第 33 行；KV cache 重放在第 18 行；缩小校验与重试在第 17 行；失败保留原文在第 164 行 |
-| 同上，第 15 行 | （练习 3） | 官方还有一步不依赖模型的剪枝：超大工具结果先被 toolResultPruner 改写，压力回安全区就跳过摘要，省一次模型调用 |
+| [`packages/llm/token-meter/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/llm/token-meter/README.zh.md) | `TokenMeter` | 教学版保留 4 字符/token 启发式；官方还能复用提供方真实用量并跟踪 projectedTokens |
+| 同上 | 解耦 | 官方 meter 与模型路由、压缩策略无关，压力判定留给消费方 |
+| [`packages/compaction/compaction-basic/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/compaction/compaction-basic/README.zh.md) | `compact` | 对齐 0.8/0.16 阈值、KV cache 重放、缩小校验、重试与失败保留原文 |
+| 同上 | （练习 3） | 官方先用 toolResultPruner 改写超大工具结果；压力恢复安全时跳过摘要，省一次模型调用 |
 
 ## 练习
 
 1. **阈值实验。** 把 CONTEXT_WINDOW 改成 20000，压力只有 20%，观察压缩不再触发；解释阈值判定在 Agent 循环里的位置。
 2. **retain 实验。** 把 retain_ratio 改成 0.4，观察被压缩区变小、保留原文变多、token 节省变少，体会省 token 与保细节的权衡。
-3. **剪枝先行。** 仿照官方第 15 行，在压缩前先扫描被压缩区里的超大单条消息，比如超过 2000 字符的工具结果，把它改写为前 200 字符加共 N 字符的说明，重新计量，若压力已回安全区则跳过摘要调用。
+3. **剪枝先行。** 仿照官方 toolResultPruner，在压缩前先扫描被压缩区里的超大单条消息，比如超过 2000 字符的工具结果，把它改写为前 200 字符加共 N 字符的说明，重新计量，若压力已回安全区则跳过摘要调用。
 4. **幂等性。** 对已压缩过的历史再压一次，观察第二次压缩的输入里 `<compacted-summary>` 块去哪了。它成了被压缩区的一部分，官方压缩指令的 Rules 一节专门要求合并旧 checkpoint，读一遍那段指令。

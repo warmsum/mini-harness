@@ -42,7 +42,7 @@ class SandboxPolicy:
 
     def writable_roots(self) -> list[Path]:
         """可写根目录集合：工作区根 + 平台临时目录。
-        （对应官方文档第 16 行的 writableRoots 派生集合。）"""
+        （对应官方 writableRoots 派生集合。）"""
         return [
             self.workspace_root,
             Path(tempfile.gettempdir()),
@@ -54,10 +54,14 @@ class SandboxPolicy:
 
         规范化（resolve）是核心——攻击路径 `workspace/../etc/passwd`
         在词法上逃出工作区，resolve 后无处遁形。
-        诚实边界：这是「约束」而非「安全边界」（官方文档第 21 行），
+        诚实边界：这是「约束」而非「安全边界」，
         真正的内核级隔离属于第 11 章的 shell 沙箱。"""
         if self.mode == DANGER_FULL_ACCESS:
             return target
+        if self.mode == READ_ONLY:
+            raise SandboxDeniedError(str(target), self.mode)
+        if self.mode != WORKSPACE_WRITE:
+            raise ValueError(f"未知 sandbox mode: {self.mode}")
         resolved = target.resolve()
         for root in self.writable_roots():
             root_resolved = root.resolve()

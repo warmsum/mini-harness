@@ -285,6 +285,7 @@ class DeepSeekClient:
     # 上一节的字段和 chat() 略
 
     async def stream(self, messages: list[Message]):
+        completed = False
         async with httpx.AsyncClient(timeout=60) as client:
             async with aconnect_sse(
                 client,
@@ -302,12 +303,15 @@ class DeepSeekClient:
             ) as event_source:
                 async for event in event_source.aiter_sse():
                     if event.data == "[DONE]":
+                        completed = True
                         break
                     payload = json.loads(event.data)
                     delta = payload["choices"][0].get("delta", {})
                     piece = delta.get("content")
                     if piece:
                         yield piece
+        if not completed:
+            raise RuntimeError("流式响应在 [DONE] 之前中断，拒绝保存不完整消息")
 ```
 
 逐段理解：
@@ -315,7 +319,7 @@ class DeepSeekClient:
 - `async with httpx.AsyncClient(...)` 是异步版 HTTP 客户端。`async with` 与普通 `with` 作用相同，用完自动关闭，区别是进出块时可以 `await` 等待。
 - `aconnect_sse(...)` 是 httpx-sse 提供的异步 SSE 连接入口。第一个参数是 http 客户端，然后是请求方法和地址，后面与 `chat()` 一样传 `headers` 和 `json`，注意 `stream` 为 `True`。
 - `async for event in event_source.aiter_sse()` 每收到一条 SSE 事件迭代一次，`event.data` 就是去掉 `data: ` 前缀后的文本。
-- `if event.data == "[DONE]": break` 是 DeepSeek 的结束标记，收到就退出循环。
+- `[DONE]` 是 DeepSeek 的正常结束标记。实现会单独记录它是否出现；SSE 连接静默断开但没有 `[DONE]` 时必须抛错，不能把已经收到的半条回答冒充成完整消息。
 - `payload["choices"][0].get("delta", {})` 用 `get` 而不是下标，个别事件里可能没有 `delta` 字段，比如只带用量统计的事件，用 `get` 安全地给空字典。
 - `if piece: yield piece` 只产出非空文本。有些 delta 的 `content` 是 `None`，比如流刚开始时的元信息，跳过它们。
 
@@ -350,7 +354,7 @@ class DeepSeekClient:
 
 - `pieces` 列表暂存所有分片，`"".join(pieces)` 把它们按顺序拼成完整文本。
 - 返回的是 `Message` 实例，`frozen=True` 保证这条消息从此不可篡改。
-- 流中途抛异常时，函数直接以异常结束，半成品消息根本不会产生，这就是历史只存完整消息的落地方式。
+- 流中途抛异常，或连接结束前没有收到 `[DONE]` 时，函数都以异常结束，半成品消息根本不会产生。这就是历史只存完整消息的落地方式。
 
 这段实现虽然很短，却建立了后续章节都会遵守的约束。从第 02 章起，历史中还会出现工具调用和工具结果，但“分片用于展示，完整消息才写入历史”的规则不会改变。
 
@@ -387,8 +391,8 @@ uv run python chapters/01-streaming-agent/src/demo.py
 
 | 官方代码 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/llm/llm-deepseek/src/adapter.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/llm/llm-deepseek/src/adapter.ts) | `DeepSeekClient.stream()` | 官方 DeepSeek 适配器，第 286 行 `accept: text/event-stream` 同样走 SSE |
-| [`packages/llm/llm/src/assembler.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/llm/llm/src/assembler.ts) | `stream_message()` | 官方 `BlockAssembler`，第 60-63 行处理 `text-delta` 分片 |
+| [`packages/llm/llm-deepseek/src/adapter.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/llm/llm-deepseek/src/adapter.ts) | `DeepSeekClient.stream()` | DeepSeek 适配器解析 SSE，并把 provider 的正常结束、错误与中止转换成明确的 finish 语义 |
+| [`packages/llm/llm/src/assembler.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/llm/llm/src/assembler.ts) | `stream_message()` | `BlockAssembler` 只在收到合法结束后产出最终消息；回放元数据也绑定到最终保留内容 |
 
 两处差异：官方的组装器同时处理文本、思考、工具调用三种分片，并且要求每个块以 `block-end` 事件正式收尾，流中途断了会留下明确的失败记录，而不是静默接受半条消息。工具调用分片留到第 02 章展开，错误处理的分寸会在第 07 章系统化处理。
 
@@ -397,4 +401,4 @@ uv run python chapters/01-streaming-agent/src/demo.py
 1. **换一个 system 提示词。** 把 demo 的 `system` 提示词改成用英文回答所有问题，重新运行，观察输出变化。同样的请求，为什么只是换了一行 `system` 文本，模型行为就变了？把这个问题的答案写下来。
 2. **读一次真实的错误。** 把 `.env` 里的 Key 故意改错一位，重新运行，观察 `raise_for_status()` 抛出的异常里状态码是多少，应该为 401。比较“立即报告 HTTP 错误”和“继续解析错误响应”两种行为，说明前者为什么更容易定位问题。
 3. **观察空分片。** 把 `stream()` 里的 `if piece:` 删掉，无条件 `yield delta.get("content")`，运行后观察输出中多出的 `None`。想想为什么某些 delta 没有 `content` 字段，以及删掉检查后下游代码会受到什么影响。
-4. **做一次截断实验。** 给请求体加一个 `max_tokens: 20` 字段，协议原生支持，运行后观察长回答如何被截断。截断发生时，1.5 节的组装逻辑会收到什么？历史里存的还是完整消息吗？
+4. **做一次截断实验。** 给请求体加一个 `max_tokens: 20` 字段，协议原生支持，运行后观察长回答如何以正常的长度上限结束。它与“连接在 `[DONE]` 前消失”有什么不同？为什么前者可以形成完整消息，后者必须拒绝？

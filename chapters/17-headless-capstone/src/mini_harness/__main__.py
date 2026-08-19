@@ -3,7 +3,7 @@
 用法（在 src 目录下运行）：
     python -m mini_harness "你的任务"
 
-对应官方 bundle/headless 的 runner 语义（headless 文档第 7 行）：
+对应官方 bundle/headless 的 runner 语义：
 创建 Agent、把任务作为普通用户消息提交、等待完全停稳、
 把最后一条 assistant 文本写入 stdout；最终 turn/end 完成 → 退出码 0，
 否则 1。进程不打开任何监听端口。
@@ -15,11 +15,12 @@ import sys
 
 from .agent import Agent
 from .calculator import calculator
-from .client import DeepSeekClient
+from .client import DeepSeekClient, Message
 from .meter import TokenMeter
 from .persistence import JsonlStore
 from .prompt import PromptAssembler
 from .registry import ToolRegistry
+from .session import Session
 
 SESSION_FILE = "session.jsonl"
 
@@ -75,9 +76,7 @@ def run_task(task: str, session_file: str = SESSION_FILE) -> tuple[str, bool]:
     return final_text, completed
 
 
-def _messages_of(session) -> list:
-    from .client import Message
-
+def _messages_of(session: Session) -> list[Message]:
     system = Message(role="system", content="(组装提示词)")
     return [system, *session.derive_messages()]
 

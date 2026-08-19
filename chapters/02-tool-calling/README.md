@@ -347,7 +347,7 @@ def run_agent(
     tools: list[Tool],
     system_prompt: str,
     user_prompt: str,
-    max_turns: int = 10,
+    max_steps: int = 10,
 ) -> list[Message]:
     tools_by_name = {tool.name: tool for tool in tools}
     history: list[Message] = [
@@ -355,7 +355,7 @@ def run_agent(
         Message(role="user", content=user_prompt),
     ]
 
-    for turn in range(max_turns):
+    for _step in range(max_steps):
         reply = client.chat(history, tools)
         history.append(reply)
 
@@ -376,12 +376,12 @@ def run_agent(
                 Message(role="tool", content=result, tool_call_id=call.id)
             )
 
-    raise RuntimeError(f"Agent 在 {max_turns} 轮内没有结束")
+    raise RuntimeError(f"Agent 在 {max_steps} 个 step 内没有结束")
 ```
 
 循环里有三个关键决策：
 
-**决策一：终止条件。** 循环什么时候停？只有一种自然终点，模型不再请求工具，也就是 `reply.tool_calls` 为空。`max_turns` 是安全阀：模型可能陷入反复请求同一个工具的死循环，比如参数一直填错，没有上限程序就会永远转下去。官方 Harness 对失控轮次的治理更精细，第 07 章展开。
+**决策一：终止条件。** 循环什么时候停？只有一种自然终点，模型不再请求工具，也就是 `reply.tool_calls` 为空。`max_steps` 是安全阀：模型可能陷入反复请求同一个工具的死循环，比如参数一直填错，没有上限程序就会永远转下去。官方 Harness 对失控轮次的治理更精细，第 07 章展开。
 
 **决策二：错误回灌而不是中断。** 工具执行失败时，比如参数解析失败、除数为零，程序不崩溃，而是把错误文本作为工具结果回灌。模型读到工具执行出错：除数为零，下一轮会自己换参数重试。这模拟了人类遇到错误时的行为，Agent 的健壮性来自让模型看见错误。
 
@@ -449,9 +449,9 @@ uv run python chapters/02-tool-calling/src/demo.py
 
 | 官方代码 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/core/agent-loop/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/core/agent-loop/README.zh.md) | `run_agent()` | 官方循环同样把工具调用与结果记录并回灌，第 105 行；官方循环是流式加多 step 的完整版，第 07 章对齐 |
-| [`packages/core/tools/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/core/tools/README.zh.md) | `Tool` | 官方 `ToolDefinition` 注册进 `ctx.tools` 注册表，执行走 pre-execute 到 execute 到 post-execute 流水线，第 5 行，第 05 章对齐 |
-| [`packages/llm/llm/src/assembler.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/llm/llm/src/assembler.ts) | `chat()` 的解析 | 官方组装器在流式模式下逐分片拼装 tool-call 块；本章用非流式 `chat()` 拿完整 tool_calls，流式工具分片见练习 4 |
+| [`packages/core/agent-loop/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/core/agent-loop/README.zh.md) | `run_agent()` | 官方循环同样记录工具调用与结果并回灌；它是流式、多 step 的完整版，第 07 章继续对齐 |
+| [`packages/core/tools/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/core/tools/README.zh.md) | `Tool` | 官方 `ToolDefinition` 注册进 `ctx.tools`，执行经过 pre-execute、execute、post-execute 管线 |
+| [`packages/llm/llm/src/assembler.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/llm/llm/src/assembler.ts) | `chat()` 的解析 | 官方组装器在流式模式下逐分片拼装 tool-call 块；本章用非流式 `chat()` 拿完整 tool_calls，流式工具分片见练习 4 |
 
 ## 练习
 

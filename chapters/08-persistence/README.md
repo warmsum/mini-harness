@@ -11,7 +11,7 @@ DeepSeek Harness 将这项能力实现为独立后端包 session-persistence-jso
 完成本章后，你将能够：
 
 - 把 `SessionEvent` 按 JSONL 格式写入文件并重新加载；
-- 使用临时文件与 `os.replace` 避免发布半写入文件；
+- 首次创建时原子发布，后续只追加尚未落盘的事件；
 - 校验文件头、格式版本和事件编号；
 - 识别残缺尾行，并为未闭合轮次补充崩溃收尾事件。
 
@@ -19,11 +19,11 @@ DeepSeek Harness 将这项能力实现为独立后端包 session-persistence-jso
 
 写一个把日志存进文件的存储，看似只是序列化加写文件，实际有三个问题必须正面回答：
 
-1. 写到一半崩溃了怎么办？如果直接往目标文件写，进程在中途被杀，磁盘上就留下一个半截文件，下次加载读到坏行，整个会话报废。答案是原子发布：先写临时文件，写完整后用 `os.replace` 一次换名。文件系统保证这个换名是原子的，任何时刻，目标路径上要么是完整的旧文件，要么是完整的新文件，绝无中间态。
-2. 加载时遇到坏数据怎么办？文件可能被手动编辑、被截断、被换行符污染。答案是分层防御：文件头校验格式与版本，读错文件立刻失败；逐行解析时遇到残缺尾行直接截断，并合成一条收尾事件补上缺失的轮次边界。日志在磁盘上也必须保持第 05 章建立的轮次闭合不变量。
-3. 性能怎么办？每条事件来一次磁盘写，慢。答案是批量落盘：内存里攒一批，统一刷。官方叫 flush，配 200ms 合并窗口。教学版把批量省了，demo 的会话只有几条事件，`save()` 一次性写入，真实的增量 flush 留给练习 2。
+1. 第一次创建怎么避免半文件？先写临时文件、`fsync`，再用 `os.replace` 原子发布 header 和已有前缀。
+2. 后续事件怎么保存？目标文件已经公开后不能每次整份重写；`save()` 先确认磁盘日志是内存日志的严格前缀，再只追加新增事件并 `fsync`。
+3. 哪些损坏可以修？只有文件末尾“没有换行的最后一个片段”能证明是一次未完成 append，可以安全截断。任何完整行或中间行解析失败都必须拒绝，不能借“崩溃恢复”静默丢掉后续数据。
 
-## 8.2 落盘：JSONL 与原子发布
+## 8.2 落盘：首次原子发布，随后仅追加
 
 ```python
 class JsonlStore:
@@ -31,31 +31,25 @@ class JsonlStore:
         self.path = Path(path)
 
     def save(self, session: Session) -> None:
-        lines = [
-            json.dumps({"format": HEADER_FORMAT, "version": HEADER_VERSION}, ensure_ascii=False)
-        ]
-        for event in session.events:
-            lines.append(
-                json.dumps(
-                    {
-                        "id": event.id,
-                        "type": event.type,
-                        "ts": event.ts,
-                        "data": event.data,
-                    },
-                    ensure_ascii=False,
-                )
-            )
-        tmp_path = self.path.with_name(self.path.name + ".tmp")
-        tmp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        os.replace(tmp_path, self.path)
+        if not self.path.exists():
+            # header + 当前前缀写入临时文件，fsync 后原子发布
+            ...
+            os.replace(tmp_path, self.path)
+            return
+
+        persisted, torn_offset = self._read_records()
+        if torn_offset is not None:
+            raise ValueError("请先 load() 修复残缺尾部")
+        if tuple(persisted) != session.events[:len(persisted)]:
+            raise ValueError("磁盘日志不是当前日志的前缀")
+        # 只追加 pending，并 flush + fsync
 ```
 
 逐段看：
 
 - 首行 header 写 format 与 version。它的用途在加载侧：未来的格式演进靠 version 判断，读错文件靠 format 拦截。
 - 每行一条事件，事件四元组 id、type、ts、data 原样序列化。`ensure_ascii=False` 让中文原样保存，文件里的人类可读性更好。
-- `os.replace` 完成最后的原子发布。程序先写入 `.tmp` 临时文件，确认内容完整后再一次换名。官方在 POSIX 上使用硬链接无覆盖发布并配合 fsync；教学版用 Python 内置操作保留相同的发布思路。
+- 首次发布使用临时文件、`fsync` 和 `os.replace`；后续调用验证前缀后仅追加。这保留了官方“已公开历史永不重写”的核心语义。
 
 ## 8.3 读回：校验与崩溃修复
 
@@ -64,34 +58,11 @@ class JsonlStore:
         if not self.path.exists():
             raise FileNotFoundError(f"会话文件不存在: {self.path}")
 
-        lines = self.path.read_text(encoding="utf-8").splitlines()
-        header = json.loads(lines[0])
-        if (
-            header.get("format") != HEADER_FORMAT
-            or header.get("version") != HEADER_VERSION
-        ):
-            raise ValueError(f"无法识别的会话文件头: {header}")
-
-        events: list[SessionEvent] = []
-        for line in lines[1:]:
-            try:
-                raw = json.loads(line)
-            except json.JSONDecodeError:
-                # 残缺尾行：截断 + 合成收尾
-                events.append(
-                    SessionEvent(
-                        id=len(events),
-                        type="turn/end",
-                        ts=0.0,
-                        data={"turn": 0, "reason": "crashed"},
-                    )
-                )
-                break
-            events.append(
-                SessionEvent(
-                    id=raw["id"], type=raw["type"], ts=raw["ts"], data=raw["data"]
-                )
-            )
+        events, torn_offset = self._read_records()
+        if torn_offset is not None:
+            with self.path.open("r+b") as file:
+                file.truncate(torn_offset)
+            _append_recovery_closers(events)
         return Session.from_log(events)
 ```
 
@@ -99,7 +70,7 @@ class JsonlStore:
 
 1. 文件不存在直接抛 `FileNotFoundError`，调用方不该拿到一个空会话假装一切正常。
 2. header 校验失败立即抛错。读到别人的文件、未来版本的文件，都该响亮失败而不是猜。
-3. `json.loads` 抛 `JSONDecodeError` 的那一行就是进程被杀时写到一半的行，后面的内容全部不可信，直接截断，并合成一条 reason 为 crashed 的 `turn/end`。轮次边界在磁盘上也必须闭合，这是第 05 章不变量在恢复路径上的延续。官方对崩溃恢复有同样的设计：保留完整解码记录，从不完整处截断，重新编码合成的步骤与轮次 closer。
+3. `_read_records` 只把末尾未换行片段标为 torn tail；完整坏行一律报错。修复后按开放状态依次合成缺失的 `tool/result`、`step/end` 和真实 turn 编号的 `turn/end`，不会再写死 `turn=0`。
 
 最后，`Session.from_log` 继续执行第 05 章建立的 id 连续性校验。
 
@@ -139,20 +110,20 @@ uv run python chapters/08-persistence/src/demo.py
 
 ## 本章小结
 
-- `JsonlStore.save()`：JSONL 序列化、临时文件、`os.replace` 原子发布
-- `JsonlStore.load()`：header 校验、残缺尾行截断、合成 turn/end 收尾
+- `JsonlStore.save()`：首次原子发布、前缀校验、后续仅追加
+- `JsonlStore.load()`：严格 header/事件校验，只修复 torn tail，合成工具/step/turn 收尾
 - 三层防御加 `from_log` 连续性校验的完整恢复链
 
 ## 对照官方
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/session/session-persistence-jsonl/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/session/session-persistence-jsonl/README.zh.md) | `JsonlStore` | JSONL 后端定义在第 5 行；延迟实体化加硬链接无覆盖发布在第 43 行，与临时文件加 rename 同义 |
-| 同上，第 44 行 | `save` | 官方仅追加、绝不重写、失败回滚字节长度，教学版整文件重写，语义等价但非增量 |
-| 同上，第 18 行 | （未实现） | 官方 packChunks 把连续流式分片打包成一行，zstd 压缩在第 36 行，纯存储优化，教学版不实现 |
-| 同上，第 45 行 | 崩溃修复 | 官方保留完整解码记录、截断不完整尾部、合成步骤与轮次 closer，与教学版截断加合成 turn/end 同构 |
+| [`packages/session/session-persistence-jsonl/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/session/session-persistence-jsonl/README.zh.md) | `JsonlStore` | 对齐仅追加 JSONL、首次无覆盖发布与恢复前校验；具体原子发布原语因平台而不同 |
+| 同上 | `save` | 两者都首次原子发布、随后仅追加；官方额外实现批量 append、写失败回滚与跨平台发布细节 |
+| 同上 | （未实现） | 官方还会打包连续流式分片并支持 zstd 压缩；这些是存储优化，教学版不实现 |
+| 同上 | 崩溃修复 | 两者只截断真正不完整的尾部，并按开放状态合成工具、step 与 turn closer；中间损坏响亮失败 |
 
-官方的持久化是增量 flush，订阅 session/event、批量落盘；教学版的 `save()` 是快照式。练习 2 会把它改造成增量版，那时第 05 章的 `subscribe` 接口正式上岗。
+官方还用协调器订阅 session/event、按窗口批量 flush，并以 zstd checksum frame 作为默认物理格式；教学版由调用方显式 `save()`，每次把尚未保存的尾部追加进去。
 
 ## 练习
 

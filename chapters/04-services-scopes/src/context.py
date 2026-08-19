@@ -17,6 +17,20 @@ Disposer = Callable[[], None]
 PluginFn = Callable[["Context", Any], Disposer | None]
 
 
+def _once(disposer: Disposer) -> Disposer:
+    """返回 single-shot disposer，手动释放与插件卸载不会重复执行。"""
+    active = True
+
+    def run() -> None:
+        nonlocal active
+        if not active:
+            return
+        active = False
+        disposer()
+
+    return run
+
+
 class PluginHandle:
     """一次插件安装的句柄。第 04 章新增：依赖声明与依赖快照。"""
 
@@ -29,21 +43,22 @@ class PluginHandle:
         self.config = config
         self.state = "pending"
 
-        self._ctx = ctx
+        self._ctx = ctx._root_context()
         self._plugin = plugin
         self._disposers: list[Disposer] = []
         self._error: Exception | None = None
 
         # 依赖声明：插件函数的 inject 属性（对应官方 Object.assign(fn, {inject})）
-        self.inject: frozenset[str] = frozenset(getattr(plugin, "inject", ()))
+        self.inject: tuple[str, ...] = tuple(dict.fromkeys(getattr(plugin, "inject", ())))
         # 依赖快照：inject 声明的服务解析成功后存在这里，
         # __getattr__ 读服务时优先查它（对应官方 fiber.store）
         self._store: dict[str, object] = {}
         self._epoch: str | None = None  # 依赖签名；None = 从未检查
 
-        ctx._handles.append(self)
-        if ctx._current is not None:
-            ctx._current.collect(self.dispose)
+        self._ctx._handles.append(self)
+        parent = ctx._owner or self._ctx._current
+        if parent is not None:
+            parent.collect(_once(self.dispose))
 
         # 依赖检查：声明了 inject 且依赖未齐 → 保持 pending，等待服务后到
         self._recheck()
@@ -62,9 +77,9 @@ class PluginHandle:
             impl = self._ctx._services.get(name)  # (value, provider_uid, version)
             if impl is not None:
                 resolved[name] = impl[0]
-                tokens.append(f"{impl[1]}:{impl[2]}")
+                tokens.append(f"{name}={impl[1]}:{impl[2]}")
             else:
-                tokens.append("-")
+                tokens.append(f"{name}=-")
         epoch = ",".join(tokens)
         if epoch == self._epoch:
             return
@@ -89,22 +104,35 @@ class PluginHandle:
         previous = self._ctx._current
         self._ctx._current = self
         try:
-            result = self._plugin(self._ctx, self.config)
+            result = self._plugin(self._ctx._view(self), self.config)
             if result is not None:
-                self._disposers.append(result)
+                self.collect(_once(result))
             self.state = "active"
         except Exception as error:
             self.state = "failed"
             self._error = error
+            try:
+                self._unload()
+            except Exception as cleanup_error:
+                raise ExceptionGroup(
+                    "插件安装失败，回滚清理也失败", [error, cleanup_error]
+                ) from None
             raise
         finally:
             self._ctx._current = previous
 
     def _unload(self) -> None:
-        for disposer in reversed(self._disposers):
-            disposer()
+        disposers = list(reversed(self._disposers))
         self._disposers.clear()
+        errors: list[Exception] = []
+        for disposer in disposers:
+            try:
+                disposer()
+            except Exception as error:
+                errors.append(error)
         self._store.clear()
+        if errors:
+            raise ExceptionGroup("插件资源清理失败", errors)
 
     def collect(self, disposer: Disposer) -> None:
         self._disposers.append(disposer)
@@ -112,22 +140,39 @@ class PluginHandle:
     def dispose(self) -> None:
         if self.state == "disposed":
             return
-        self._unload()
-        self.state = "disposed"
-        # 卸载后通知全体：依赖本插件服务的插件要跟着卸载
-        self._ctx._notify()
+        try:
+            self._unload()
+        finally:
+            self.state = "disposed"
+            # 卸载后通知全体：依赖本插件服务的插件要跟着卸载
+            self._ctx._notify()
 
 
 class Context:
     """插件安装的环境。第 04 章新增：服务表、依赖注入、瀑布事件。"""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        _root: "Context | None" = None,
+        _owner: PluginHandle | None = None,
+    ) -> None:
+        self._root = _root
+        self._owner = _owner
+        if _root is not None:
+            return
         self._handles: list[PluginHandle] = []
         self._listeners: dict[str, list[Callable[..., Any]]] = {}
         self._current: PluginHandle | None = None
         # 服务表：name -> (value, provider_uid, version)
         self._services: dict[str, tuple[object, int, int]] = {}
         self._version = 0
+
+    def _root_context(self) -> "Context":
+        return self if self._root is None else self._root
+
+    def _view(self, owner: PluginHandle) -> "Context":
+        """创建绑定到插件 fiber 的视图，供回调在安装后继续访问依赖。"""
+        return Context(self._root_context(), owner)
 
     # ------------------------------------------------------------------
     # 插件安装
@@ -142,28 +187,34 @@ class Context:
 
     def provide(self, name: str, value: object) -> Disposer:
         """注册一个服务。服务出现 → 通知全体重算依赖（自动启动的触发点）。"""
-        self._version += 1
-        provider_uid = self._current.uid if self._current is not None else 0
-        self._services[name] = (value, provider_uid, self._version)
-        self._notify()
+        root = self._root_context()
+        if name in root._services:
+            raise ValueError(f'服务 "{name}" 已被注册')
+        root._version += 1
+        owner = self._owner or root._current
+        provider_uid = owner.uid if owner is not None else 0
+        registration = (value, provider_uid, root._version)
+        root._services[name] = registration
+        root._notify()
 
-        def unregister() -> None:
-            if name in self._services:
-                del self._services[name]
-                self._notify()
+        def unregister_service() -> None:
+            if root._services.get(name) is registration:
+                del root._services[name]
+                root._notify()
 
-        if self._current is not None:
-            self._current.collect(unregister)  # 提供者卸载 → 服务随之注销
+        unregister = _once(unregister_service)
+        if owner is not None:
+            owner.collect(unregister)  # 提供者卸载 → 服务随之注销
         return unregister
 
     def get(self, name: str) -> object | None:
         """非严格查找：找不到返回 None（对应官方 ctx.get）。"""
-        impl = self._services.get(name)
+        impl = self._root_context()._services.get(name)
         return impl[0] if impl is not None else None
 
     def _notify(self) -> None:
         """遍历全部句柄重算依赖（官方 reflect.notify 的教学简化版）。"""
-        for handle in list(self._handles):
+        for handle in list(self._root_context()._handles):
             handle._recheck()
 
     # ------------------------------------------------------------------
@@ -178,13 +229,14 @@ class Context:
         2. 声明了依赖但未就绪 → 报「依赖未就绪」
         3. 没声明 → 报「必须先 inject」（依赖显式化是语法，不是约定）
         """
-        handle = self._current
+        root = self._root_context()
+        handle = self._owner or root._current
         if handle is not None:
             if name in handle._store:
                 return handle._store[name]
             if name in handle.inject:
                 raise AttributeError(f'服务 "{name}" 已声明依赖但尚未就绪')
-        if name in self._services:
+        if name in root._services:
             raise AttributeError(f'读取服务 "{name}" 前必须在 inject 里声明')
         raise AttributeError(f"Context 没有属性 {name!r}")
 
@@ -193,17 +245,22 @@ class Context:
     # ------------------------------------------------------------------
 
     def on(self, event: str, listener: Callable[..., Any]) -> Disposer:
-        self._listeners.setdefault(event, []).append(listener)
+        root = self._root_context()
+        root._listeners.setdefault(event, []).append(listener)
 
-        def remove() -> None:
-            self._listeners[event].remove(listener)
+        def remove_listener() -> None:
+            listeners = root._listeners.get(event)
+            if listeners is not None and listener in listeners:
+                listeners.remove(listener)
 
-        if self._current is not None:
-            self._current.collect(remove)
+        remove = _once(remove_listener)
+        owner = self._owner or root._current
+        if owner is not None:
+            owner.collect(remove)
         return remove
 
     def emit(self, event: str, *args: Any) -> None:
-        for listener in list(self._listeners.get(event, [])):
+        for listener in list(self._root_context()._listeners.get(event, [])):
             listener(*args)
 
     def waterfall(self, event: str, *args: Any) -> Any:
@@ -214,7 +271,7 @@ class Context:
         新参数。不调 next() 即否决本次派发。
         """
         *call_args, next_fn = args
-        listeners = list(self._listeners.get(event, []))
+        listeners = list(self._root_context()._listeners.get(event, []))
 
         def dispatch(index: int, *inner_args: Any) -> Any:
             if index >= len(listeners):
@@ -233,7 +290,10 @@ class Context:
     # ------------------------------------------------------------------
 
     def effect(self, fn: Callable[[], Disposer | None]) -> Disposer:
-        disposer = fn()
-        if disposer is not None and self._current is not None:
-            self._current.collect(disposer)
+        raw_disposer = fn()
+        disposer = _once(raw_disposer) if raw_disposer is not None else None
+        root = self._root_context()
+        owner = self._owner or root._current
+        if disposer is not None and owner is not None:
+            owner.collect(disposer)
         return disposer if disposer is not None else (lambda: None)

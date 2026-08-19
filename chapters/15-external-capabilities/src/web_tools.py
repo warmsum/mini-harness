@@ -31,6 +31,8 @@ class WebSource:
 
     title: str
     url: str
+    snippet: str | None = None
+    published_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -38,7 +40,6 @@ class WebSearchResult:
     """一次搜索的结构化结果（对应官方 WebSearchResult 的简化版）。"""
 
     sources: tuple[WebSource, ...]
-    answer: str  # 模型基于搜索结果生成的回答
     truncated: bool = False
 
 
@@ -63,19 +64,36 @@ class WebSearchClient:
         self.base_url = base_url
         self.model = model
 
-    def search(self, query: str, max_uses: int = 3) -> WebSearchResult:
+    def search(
+        self, query: str, max_results: int = 5, max_uses: int = 5
+    ) -> WebSearchResult:
         """执行一次真实搜索：服务器侧搜索，返回结构化结果。"""
+        if not query.strip():
+            raise ValueError("query 必须是非空字符串")
+        if max_results <= 0 or max_uses <= 0:
+            raise ValueError("max_results 与 max_uses 必须是正整数")
         response = httpx.post(
             f"{self.base_url}/messages",
             headers={
                 "x-api-key": self.api_key,
+                "authorization": f"Bearer {self.api_key}",
                 "anthropic-version": ANTHROPIC_VERSION,
                 "content-type": "application/json",
             },
             json={
                 "model": self.model,
                 "max_tokens": 4096,
-                "messages": [{"role": "user", "content": query}],
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"Perform a web search for the query: {query}",
+                            }
+                        ],
+                    }
+                ],
                 "tools": [
                     {
                         "type": WEB_SEARCH_TOOL,
@@ -86,25 +104,41 @@ class WebSearchClient:
             },
             timeout=120,
         )
+        if response.is_redirect:
+            raise RuntimeError("[WEB_PROVIDER_ERROR] 搜索端点不允许 HTTP 重定向")
         response.raise_for_status()
         data = response.json()
 
-        # 解析结构化来源（官方映射：url/title 一一对应；
-        # 官方还映射 page_age → publishedAt，教学版略）
+        # provider 生成的 text 不是可信答案，只从 citations 取引用片段。
+        snippets: dict[str, str] = {}
+        for block in data.get("content", []):
+            if block.get("type") != "text":
+                continue
+            for citation in block.get("citations") or []:
+                url = citation.get("url")
+                cited_text = citation.get("cited_text")
+                if url and cited_text and url not in snippets:
+                    snippets[url] = cited_text
+
         sources: list[WebSource] = []
-        answer = ""
+        found_result_block = False
         for block in data.get("content", []):
             if block.get("type") == "web_search_tool_result":
+                found_result_block = True
                 for item in block.get("content", []):
-                    if item.get("type") == "web_search_result":
+                    if item.get("type") == "web_search_result" and item.get("url"):
+                        url = item["url"]
                         sources.append(
-                            WebSource(title=item.get("title", ""), url=item.get("url", ""))
+                            WebSource(
+                                title=item.get("title", ""),
+                                url=url,
+                                snippet=snippets.get(url),
+                                published_at=item.get("page_age"),
+                            )
                         )
-            elif block.get("type") == "text":
-                answer += block.get("text", "")
 
         # 严格模式（官方行为）：没有搜索结果块 → 报错，绝不从文本里抓 URL
-        if not sources:
+        if not found_result_block:
             raise RuntimeError(
                 "[WEB_PROVIDER_ERROR] 响应中没有 web_search_tool_result 块"
             )
@@ -116,7 +150,10 @@ class WebSearchClient:
                 continue
             seen.add(source.url)
             deduped.append(source)
-        return WebSearchResult(sources=tuple(deduped), answer=answer.strip())
+        truncated = len(deduped) > max_results
+        return WebSearchResult(
+            sources=tuple(deduped[:max_results]), truncated=truncated
+        )
 
 
 def web_fetch(url: str, timeout_seconds: float = 20.0) -> str:

@@ -10,10 +10,51 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from math import copysign, isfinite
+from typing import Any, Never
 
 from client import Message, ToolCall
+
+
+class FrozenDict(dict[str, Any]):
+    """JSON 可序列化、但写入后不可修改的字典。"""
+
+    @staticmethod
+    def _immutable() -> Never:
+        raise TypeError("FrozenDict 不可修改")
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._immutable()
+
+    def __delitem__(self, key: str) -> None:
+        self._immutable()
+
+    def __ior__(self, value: Any) -> Never:  # type: ignore[misc]
+        self._immutable()
+
+    def clear(self) -> None:
+        self._immutable()
+
+    def pop(self, key: str, default: Any = None) -> Any:
+        self._immutable()
+
+    def popitem(self) -> Never:
+        self._immutable()
+
+    def setdefault(self, key: str, default: Any = None) -> Any:
+        self._immutable()
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        self._immutable()
+
+    @classmethod
+    def build(cls, items: dict[str, Any]) -> "FrozenDict":
+        frozen = cls()
+        for key, value in items.items():
+            dict.__setitem__(frozen, key, value)
+        return frozen
 
 
 @dataclass(frozen=True)
@@ -28,7 +69,7 @@ class SessionEvent:
     id: int
     type: str
     ts: float
-    data: dict[str, Any]
+    data: Mapping[str, Any]
 
 
 class Session:
@@ -36,7 +77,7 @@ class Session:
 
     def __init__(self) -> None:
         self._log: list[SessionEvent] = []
-        self._snapshot: list[SessionEvent] | None = None
+        self._snapshot: tuple[SessionEvent, ...] | None = None
         self._listeners: list[Any] = []
 
     # ------------------------------------------------------------------
@@ -63,10 +104,10 @@ class Session:
     # ------------------------------------------------------------------
 
     @property
-    def events(self) -> list[SessionEvent]:
+    def events(self) -> tuple[SessionEvent, ...]:
         """冻结快照：append 后重建（缓存避免每次全量复制）。"""
         if self._snapshot is None:
-            self._snapshot = list(self._log)
+            self._snapshot = tuple(self._log)
         return self._snapshot
 
     @property
@@ -77,8 +118,13 @@ class Session:
     def subscribe(self, listener: Any) -> Any:
         """订阅新事件（返回解绑函数）。持久化插件挂在这里。"""
         self._listeners.append(listener)
+        active = True
 
         def unsubscribe() -> None:
+            nonlocal active
+            if not active:
+                return
+            active = False
             self._listeners.remove(listener)
 
         return unsubscribe
@@ -108,7 +154,7 @@ class Session:
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_log(cls, events: list[SessionEvent]) -> "Session":
+    def from_log(cls, events: Iterable[SessionEvent]) -> "Session":
         """从既有日志重建会话（恢复/重放的入口）。
 
         校验 id 从 0 连续——日志是事实来源，缺一条都要响亮失败，
@@ -120,7 +166,21 @@ class Session:
                 raise ValueError(
                     f"重放失败：第 {index} 个事件 id 为 {event.id}（应为 {index}）"
                 )
-            session._log.append(event)
+            if not isinstance(event.type, str) or not event.type:
+                raise ValueError(f"重放失败：第 {index} 个事件 type 无效")
+            if not isinstance(event.ts, (int, float)) or not isfinite(event.ts):
+                raise ValueError(f"重放失败：第 {index} 个事件 ts 无效")
+            frozen_data = _freeze_json(event.data)
+            if not isinstance(frozen_data, FrozenDict):
+                raise ValueError(f"重放失败：第 {index} 个事件 data 必须是对象")
+            session._log.append(
+                SessionEvent(
+                    id=event.id,
+                    type=event.type,
+                    ts=float(event.ts),
+                    data=frozen_data,
+                )
+            )
         return session
 
 
@@ -134,21 +194,41 @@ def _now() -> float:
 
 
 def _freeze_json(value: Any, _path: set[int] | None = None) -> Any:
-    """冻结 + 纯 JSON 校验。拒绝不可序列化的类型与循环引用。"""
+    """冻结 + lossless JSON 校验。拒绝异常数字、非字符串键和循环引用。"""
     path = _path if _path is not None else set()
-    if value is None or isinstance(value, (str, bool, int, float)):
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, int):
+        if abs(value) > 2**53 - 1:
+            raise ValueError("事件 data 的整数超出 JSON 安全范围")
+        return value
+    if isinstance(value, float):
+        if not isfinite(value) or (value == 0.0 and copysign(1.0, value) < 0):
+            raise ValueError("事件 data 不能包含非有限数或负零")
         return value
     if isinstance(value, (list, tuple)):
-        return tuple(_freeze_json(item, path) for item in value)
-    if isinstance(value, dict):
-        if id(value) in path:
+        marker = id(value)
+        if marker in path:
             raise ValueError("事件 data 不能包含循环引用")
-        path.add(id(value))
-        result = {
-            key: _freeze_json(item, path) for key, item in value.items()
-        }
-        path.discard(id(value))
-        return result
+        path.add(marker)
+        try:
+            return tuple(_freeze_json(item, path) for item in value)
+        finally:
+            path.remove(marker)
+    if isinstance(value, dict):
+        marker = id(value)
+        if marker in path:
+            raise ValueError("事件 data 不能包含循环引用")
+        path.add(marker)
+        try:
+            result: dict[str, Any] = {}
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    raise ValueError("事件 data 的对象键必须是字符串")
+                result[key] = _freeze_json(item, path)
+            return FrozenDict.build(result)
+        finally:
+            path.remove(marker)
     raise ValueError(f"事件 data 不能包含 {type(value).__name__}（仅限纯 JSON）")
 
 

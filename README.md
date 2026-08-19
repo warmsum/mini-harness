@@ -180,42 +180,30 @@ flowchart TB
 
 ## 官方源码依据
 
-课程中的机制和术语均对照 DeepSeek Harness 官方源码。链接固定到提交 [`47f943859bef60e4160492346772ded9b24f765a`](https://github.com/deepseek-ai/DeepSeek-Harness/tree/47f943859bef60e4160492346772ded9b24f765a)，避免上游代码更新后出现路径和行号漂移。每章末尾提供与当前主题直接相关的源码链接、关键行号和 Python 等价实现说明。
-
-固定提交中的 monorepo 包版本为 `0.1.0-rc.5`，同期 npm 发布包为 `0.1.0-rc.6`。课程以固定提交的 Git 源码为技术依据。
+课程中的机制和术语均对照 DeepSeek Harness 官方源码。当前审计基线固定到 2026-08-17 的 [`99f6f02fecdb7dff40c3fbc9470f5907c29f74ca`](https://github.com/deepseek-ai/DeepSeek-Harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca)（`0.1.0-rc.7`），避免上游继续变化后让课程结论失去可复现性。每章末尾提供当前主题的官方路径、保留的核心语义，以及为了教学而主动省略的工程能力。
 
 <details>
 <summary><strong>查看 17 章官方源码对照表</strong></summary>
 
-| 章 | 教学版机制 | 官方路径（前缀 `https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/`） | 关键行号 |
-|---|---|---|---|
-| 01 | SSE 流式 | `packages/llm/llm-deepseek/src/adapter.ts` | 286（text/event-stream） |
-| 01 | 分片组装 | `packages/llm/llm/src/assembler.ts` | 60-63（text-delta） |
-| 02 | 工具调用往返 | `packages/core/agent-loop/README.zh.md` | 105（工具调用与结果回灌） |
-| 02 | 工具注册 | `packages/core/tools/README.zh.md` | 5（流水线）、20（register） |
-| 03 | 插件生命周期 | `vendor/cordis/src/fiber.ts` | 184（Fiber）、148（状态机）、415（effect） |
-| 03 | Context / Proxy | `vendor/cordis/src/context.ts` | 74（Proxy） |
-| 04 | 服务与依赖 | `vendor/cordis/src/reflect.ts` | 277（provide）、314（notify）、144（严格访问） |
-| 04 | waterfall 事件 | `vendor/cordis/src/events.ts` | 234-238 |
-| 05 | 事件溯源 | `packages/core/session/README.zh.md` | 5（仅追加）、39（append）、40-41（投影） |
-| 05 | 轮次消息记录 | `packages/core/agent-loop/README.zh.md` | 105（日志记录与模型消息的区别） |
-| 06 | 提示词组装 | `packages/core/system-prompt/README.zh.md` | 5（组装注册表）、20（section）、24（variable） |
-| 06 | schema 投影 | `packages/core/tools/README.zh.md` | 24（schemas 不含 execute） |
-| 07 | inbox 与 send | `packages/core/agent-loop/README.zh.md` | 58（followup / steer / inject）、76（循环职责） |
-| 08 | JSONL 后端 | `packages/session/session-persistence-jsonl/README.zh.md` | 5（仅追加）、43（原子发布）、44（失败回滚） |
-| 09 | token 估算 | `packages/llm/token-meter/README.zh.md` | 9（4 字符/token）、32（projectedTokens） |
-| 09 | 压缩策略 | `packages/compaction/compaction-basic/README.zh.md` | 32（0.8 / 0.16）、18（KV cache）、17（收敛）、164（失败保留原文） |
-| 10 | 文件沙箱 | `packages/fs/fs-sandbox/README.zh.md` | 16（可写根）、21（约束范围）、23（结构化拒绝） |
-| 11 | 命令沙箱 | `packages/shell/bash-sandbox/README.zh.md` | 15（danger-full-access）、85（文件影响范围） |
-| 11 | 审批 | `packages/interaction/user-approval/README.zh.md` | 四种结果、fail closed |
-| 12 | 技能 | `packages/skill/skill/README.zh.md` | 17（摘要目录）、56（渐进加载）、44（renderSkillContent） |
-| 13 | 目标状态机 | `packages/goal/goal/README.zh.md` | 5（事件溯源）、22（单一目标）、24（goal/change）、28（续行不持久化） |
-| 13 | 任务清单 | `packages/todo/tool-todo/README.zh.md` | 5（整体替换）、9（快照事件）、25（校验） |
-| 14 | 子 agent | `packages/subagent/tool-subagent/README.zh.md` | 5（委派工具）、11（失败保留部分文本） |
-| 14 | fork | `packages/subagent/subagent-fork-in-process/README.zh.md` | 5（继承父对话种子） |
-| 15 | Web Search | `packages/web/web-search-deepseek/README.zh.md` | Anthropic 端点、服务器工具与严格模式 |
-| 16 | RPC 网关 | `packages/api/gateway/README.zh.md` | 5（Host / Client 端点）、9（invoke 校验） |
-| 17 | headless 组合 | `packages/bundle/headless/README.zh.md` | 5（不挂载 Host）、7（runner 语义） |
+| 章 | 教学主题 | 官方源码入口 |
+|---|---|---|
+| 01 | SSE 与完整消息提交 | `packages/llm/llm-deepseek/src/adapter.ts`、`packages/llm/llm/src/assembler.ts` |
+| 02 | 工具调用往返 | `packages/core/agent-loop/src/agent.ts`、`packages/core/tools` |
+| 03 | 插件生命周期 | `vendor/cordis/src/fiber.ts`、`vendor/cordis/src/context.ts` |
+| 04 | 服务、fiber 上下文与 waterfall | `vendor/cordis/src/reflect.ts`、`vendor/cordis/src/events.ts` |
+| 05 | 事件日志与请求 envelope | `packages/core/session`、`packages/core/agent-loop/src/agent.ts` |
+| 06 | 提示词与工具注册表 | `packages/core/system-prompt`、`packages/core/tools` |
+| 07 | turn、step 与 Inbox | `packages/core/agent/src/inbox.ts`、`packages/core/agent-loop/src/agent.ts` |
+| 08 | 仅追加 JSONL 与恢复 | `packages/session/session-persistence-jsonl` |
+| 09 | 回放感知计量与压缩 | `packages/llm/token-meter`、`packages/compaction/compaction-basic` |
+| 10 | 文件围栏与观察策略 | `packages/fs/fs-sandbox`、`packages/fs/fs-observation-policy` |
+| 11 | Shell 沙箱与审批 | `packages/shell/bash-sandbox`、`packages/interaction/user-approval` |
+| 12 | Skill 注册表与渐进加载 | `packages/skill/skill`、`packages/skill/tool-skill` |
+| 13 | Goal 与 todo | `packages/goal/goal`、`packages/todo/tool-todo` |
+| 14 | Subagent provider 与委派 | `packages/subagent/subagent`、`packages/subagent/tool-subagent` |
+| 15 | Web capability seam | `packages/web/web-search-deepseek`、`packages/web/tool-web` |
+| 16 | Settings 与 Typert 网关 | `packages/settings/settings`、`packages/api/gateway` |
+| 17 | Headless runner | `packages/bundle/headless` |
 
 </details>
 

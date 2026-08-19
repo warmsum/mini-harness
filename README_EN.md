@@ -180,42 +180,30 @@ The course aligns with DSH behavior, data flow, and lifecycle rather than TypeSc
 
 ## Official source baseline
 
-The course checks its mechanisms and terminology against the official DeepSeek Harness source. References are pinned to commit [`47f943859bef60e4160492346772ded9b24f765a`](https://github.com/deepseek-ai/DeepSeek-Harness/tree/47f943859bef60e4160492346772ded9b24f765a), so later upstream changes do not shift the paths and line numbers. Each chapter ends with source links for its topic, the relevant lines, and notes on the Python equivalent.
-
-The monorepo package version at the pinned commit is `0.1.0-rc.5`; the npm packages published around the same time are `0.1.0-rc.6`. The course treats the pinned Git source as its technical baseline.
+The course checks its mechanisms and terminology against the official DeepSeek Harness source. The current audit baseline is commit [`99f6f02fecdb7dff40c3fbc9470f5907c29f74ca`](https://github.com/deepseek-ai/DeepSeek-Harness/tree/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca), dated 2026-08-17 and released as `0.1.0-rc.7`. Pinning the source keeps every conclusion reproducible. Each chapter identifies the upstream source, the semantics retained in Python, and the engineering features intentionally omitted for teaching.
 
 <details>
 <summary><strong>Open the source map for all 17 chapters</strong></summary>
 
-| Ch. | Teaching mechanism | Official path (prefix `https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/`) | Key lines |
-|---|---|---|---|
-| 01 | SSE streaming | `packages/llm/llm-deepseek/src/adapter.ts` | 286 (text/event-stream) |
-| 01 | Chunk assembly | `packages/llm/llm/src/assembler.ts` | 60-63 (text-delta) |
-| 02 | Tool round trip | `packages/core/agent-loop/README.zh.md` | 105 (tool calls and results) |
-| 02 | Tool registration | `packages/core/tools/README.zh.md` | 5 (pipeline), 20 (register) |
-| 03 | Plugin lifecycle | `vendor/cordis/src/fiber.ts` | 184 (Fiber), 148 (states), 415 (effect) |
-| 03 | Context / Proxy | `vendor/cordis/src/context.ts` | 74 (Proxy) |
-| 04 | Services and dependencies | `vendor/cordis/src/reflect.ts` | 277 (provide), 314 (notify), 144 (strict access) |
-| 04 | Waterfall events | `vendor/cordis/src/events.ts` | 234-238 |
-| 05 | Event sourcing | `packages/core/session/README.zh.md` | 5 (append-only), 39 (append), 40-41 (projection) |
-| 05 | Per-turn recording | `packages/core/agent-loop/README.zh.md` | 105 (log records versus model messages) |
-| 06 | Prompt assembly | `packages/core/system-prompt/README.zh.md` | 5 (registry), 20 (section), 24 (variable) |
-| 06 | Schema projection | `packages/core/tools/README.zh.md` | 24 (schemas exclude execute) |
-| 07 | Inbox and send | `packages/core/agent-loop/README.zh.md` | 58 (followup / steer / inject), 76 (loop responsibilities) |
-| 08 | JSONL backend | `packages/session/session-persistence-jsonl/README.zh.md` | 5 (append-only), 43 (atomic publish), 44 (rollback) |
-| 09 | Token estimate | `packages/llm/token-meter/README.zh.md` | 9 (4 chars/token), 32 (projectedTokens) |
-| 09 | Compaction policy | `packages/compaction/compaction-basic/README.zh.md` | 32 (0.8 / 0.16), 18 (KV cache), 17 (convergence), 164 (keep original on failure) |
-| 10 | Filesystem sandbox | `packages/fs/fs-sandbox/README.zh.md` | 16 (writable roots), 21 (scope of the constraint), 23 (structured denial) |
-| 11 | Shell sandbox | `packages/shell/bash-sandbox/README.zh.md` | 15 (danger-full-access), 85 (scope of file effects) |
-| 11 | Approval | `packages/interaction/user-approval/README.zh.md` | four outcomes, fail closed |
-| 12 | Skills | `packages/skill/skill/README.zh.md` | 17 (summary catalog), 56 (progressive loading), 44 (renderSkillContent) |
-| 13 | Goal state machine | `packages/goal/goal/README.zh.md` | 5 (event sourcing), 22 (single goal), 24 (goal/change), 28 (continuation not persisted) |
-| 13 | Todo list | `packages/todo/tool-todo/README.zh.md` | 5 (full replacement), 9 (snapshot event), 25 (validation) |
-| 14 | Sub-agent | `packages/subagent/tool-subagent/README.zh.md` | 5 (delegation tool), 11 (partial text kept on failure) |
-| 14 | Fork | `packages/subagent/subagent-fork-in-process/README.zh.md` | 5 (seeded with parent turns) |
-| 15 | Web Search | `packages/web/web-search-deepseek/README.zh.md` | Anthropic endpoint, server tool, and strict mode |
-| 16 | RPC gateway | `packages/api/gateway/README.zh.md` | 5 (host / client endpoints), 9 (invoke validation) |
-| 17 | Headless bundle | `packages/bundle/headless/README.zh.md` | 5 (no host mounted), 7 (runner semantics) |
+| Ch. | Teaching topic | Official source entry |
+|---|---|---|
+| 01 | SSE and complete-message commit | `packages/llm/llm-deepseek/src/adapter.ts`, `packages/llm/llm/src/assembler.ts` |
+| 02 | Tool-call round trip | `packages/core/agent-loop/src/agent.ts`, `packages/core/tools` |
+| 03 | Plugin lifecycle | `vendor/cordis/src/fiber.ts`, `vendor/cordis/src/context.ts` |
+| 04 | Services, fiber context, and waterfall | `vendor/cordis/src/reflect.ts`, `vendor/cordis/src/events.ts` |
+| 05 | Event log and request envelope | `packages/core/session`, `packages/core/agent-loop/src/agent.ts` |
+| 06 | Prompt and tool registries | `packages/core/system-prompt`, `packages/core/tools` |
+| 07 | Turns, steps, and Inbox | `packages/core/agent/src/inbox.ts`, `packages/core/agent-loop/src/agent.ts` |
+| 08 | Append-only JSONL and recovery | `packages/session/session-persistence-jsonl` |
+| 09 | Replay-aware metering and compaction | `packages/llm/token-meter`, `packages/compaction/compaction-basic` |
+| 10 | Filesystem fence and observation policy | `packages/fs/fs-sandbox`, `packages/fs/fs-observation-policy` |
+| 11 | Shell sandbox and approval | `packages/shell/bash-sandbox`, `packages/interaction/user-approval` |
+| 12 | Skill registry and progressive loading | `packages/skill/skill`, `packages/skill/tool-skill` |
+| 13 | Goal and todo | `packages/goal/goal`, `packages/todo/tool-todo` |
+| 14 | Subagent providers and delegation | `packages/subagent/subagent`, `packages/subagent/tool-subagent` |
+| 15 | Web capability seam | `packages/web/web-search-deepseek`, `packages/web/tool-web` |
+| 16 | Settings and Typert gateway | `packages/settings/settings`, `packages/api/gateway` |
+| 17 | Headless runner | `packages/bundle/headless` |
 
 </details>
 

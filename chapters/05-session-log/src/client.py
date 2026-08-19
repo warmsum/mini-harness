@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -167,8 +168,9 @@ class DeepSeekClient:
 
     # ---------- 流式方法（与第 01 章相同，用于终端展示） ----------
 
-    async def stream(self, messages: list[Message]):
+    async def stream(self, messages: list[Message]) -> AsyncIterator[str]:
         """流式调用：只处理纯文本回答的展示。工具调用场景见 README 对照。"""
+        completed = False
         async with httpx.AsyncClient(timeout=60) as client:
             async with aconnect_sse(
                 client,
@@ -186,9 +188,12 @@ class DeepSeekClient:
             ) as event_source:
                 async for event in event_source.aiter_sse():
                     if event.data == "[DONE]":
+                        completed = True
                         break
                     payload = json.loads(event.data)
                     delta = payload["choices"][0].get("delta", {})
                     piece = delta.get("content")
                     if piece:
                         yield piece
+        if not completed:
+            raise RuntimeError("流式响应在 [DONE] 之前中断，拒绝保存不完整消息")

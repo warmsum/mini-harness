@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from agent import run_agent
 from calculator import calculator
-from client import DeepSeekClient
+from client import DeepSeekClient, Message
 from session import Session, SessionEvent
 
 
@@ -22,8 +22,7 @@ def print_event(event: SessionEvent) -> None:
     print(f"  #{event.id:<2} {event.type:<20} {event.data}")
 
 
-def print_message(message: object) -> None:
-    m = message  # noqa: 仅演示用
+def print_message(m: Message) -> None:
     if m.role == "assistant" and m.tool_calls:
         calls = ", ".join(f"{c.name}({c.arguments})" for c in m.tool_calls)
         print(f"  [assistant → 请求工具] {calls}")
@@ -50,7 +49,7 @@ def main() -> None:
         system_prompt="你是一个数学助手。遇到算式时先调用 calculator 工具计算，"
         "再基于计算结果回答。",
         user_prompt="1+2*3 等于几？",
-        max_turns=10,
+        max_steps=10,
     )
     for event in result.events:
         print_event(event)

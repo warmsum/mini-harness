@@ -11,12 +11,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from client import DeepSeekClient, Message
 from meter import TokenMeter, estimate_message
 
 # 压缩指令：逐字复刻官方 COMPACTION_INSTRUCTION
-# （packages/compaction/compaction-basic/README.zh.md，英文原文自 113 行起）
+# （packages/compaction/compaction-basic/README.zh.md 中的英文原文）
 COMPACTION_INSTRUCTION = """You are now acting as a compaction engine for this AI coding assistant. Condense the conversation ABOVE into a structured checkpoint that lets another model resume the work with no loss of essential context.
 
 Output EXACTLY the Markdown structure below: keep every section, in order. Use terse bullets, not prose paragraphs. Write "(none)" for an empty section — never drop a section.
@@ -75,7 +76,11 @@ class CompactResult:
     reason: str
 
 
-def should_compact(meter: TokenMeter, messages: list[Message], tools=None) -> bool:
+def should_compact(
+    meter: TokenMeter,
+    messages: list[Message],
+    tools: list[Any] | None = None,
+) -> bool:
     """压力是否达到阈值（官方 thresholdRatio 默认 0.8）。"""
     pressure = meter.pressure(meter.measure(messages, tools))
     return pressure.over_threshold
@@ -105,7 +110,7 @@ def build_summary_prompt(messages: list[Message], tail_start: int) -> list[Messa
 
     KV cache 复用的来源：这个重放与「下一次真实请求」的前缀逐字节
     一致——provider 的前缀缓存直接命中，只有末尾的指令和摘要输出
-    是未缓存的（官方 README.zh.md 第 18 行）。"""
+    是未缓存的。"""
     return [
         messages[0],  # system：原样重放
         *messages[1:tail_start],  # 被压缩区逐字重放
@@ -169,7 +174,7 @@ def compact(
         checkpoint = build_checkpoint_message(summary_text)
         checkpoint_tokens = estimate_message(checkpoint)
 
-        # 缩小校验：checkpoint 不小于被压缩区 → 拒绝本次摘要（官方文档第 17 行）
+        # 缩小校验：checkpoint 不小于被压缩区 → 拒绝本次摘要
         if checkpoint_tokens >= shadowed_tokens:
             print(
                 f"    ↳ 第 {attempt + 1} 次摘要未缩小"

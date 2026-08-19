@@ -49,11 +49,11 @@ class SessionEvent:
     id: int
     type: str
     ts: float
-    data: dict[str, Any]
+    data: Mapping[str, Any]
 ```
 
 - `id` 从 0 开始连续递增，5.6 节的重放校验靠它。
-- `type` 是事件类型。本章用到 6 种：`turn/start`、`user/message`、`assistant/message`、`tool/call`、`tool/result`、`turn/end`。第 08 章持久化会接上更多种类。
+- `type` 是事件类型。除消息和工具事件外，本章还记录 `request/header`、`step/start`、`step/end` 与 turn 边界，共同描述请求 envelope 和 turn/step 关系。
 - `ts` 是时间戳，记录事件发生的时刻。
 - `data` 是事件内容，`frozen=True` 保证事件对象本身不可改。
 
@@ -65,7 +65,7 @@ class SessionEvent:
 class Session:
     def __init__(self) -> None:
         self._log: list[SessionEvent] = []
-        self._snapshot: list[SessionEvent] | None = None
+        self._snapshot: tuple[SessionEvent, ...] | None = None
         self._listeners: list[Any] = []
 
     def append(self, type: str, data: dict[str, Any]) -> SessionEvent:
@@ -80,7 +80,7 @@ class Session:
 
 三个动作，各对应一个设计意图：
 
-1. `_freeze_json(data)` 在写入前校验并冻结。校验拒绝函数、集合、循环引用等非纯 JSON 内容，日志要能持久化到磁盘，第 08 章会做，坏数据必须在写入时就失败，而不是几小时后落盘时才爆雷。冻结把 data 里的列表转成元组、字典转成只读形式，日志一旦写入就再无法修改。这是第 01 章 `frozen=True` 思想的升级版，从消息不可变到整段历史不可变。
+1. `_freeze_json(data)` 在写入前校验并冻结。它拒绝循环引用、非字符串对象键、非有限数、负零、超出 JSON 安全范围的整数和非 JSON 类型；列表变成元组，字典变成仍可序列化的 `FrozenDict`。事件和 `events` 元组都不能被调用方改写。
 2. `self._snapshot = None` 让外部读日志走 `events` 属性拿缓存快照，append 后缓存失效，下次读取重建，高频读取不被每次全量复制拖慢。
 3. 通知订阅者。`subscribe` 挂在 Session 上的观察者实时收到新事件。官方的持久化插件正是这样工作的，官方文档写明插件订阅 session/event，在 flush 时刷新。第 08 章我们自己也写一个这样的插件。
 
@@ -130,7 +130,7 @@ def _derive_event_message(event: SessionEvent) -> Message | None:
 | `user/message` | `role="user"` | 人的话 |
 | `assistant/message` | `role="assistant"` | 模型的话，可能带 tool_calls |
 | `tool/result` | `role="tool"` | 工具结果，带 tool_call_id 对应 |
-| `turn/start`、`tool/call`、`turn/end` | 不投影 | 过程记录，只进日志 |
+| `request/header`、step/turn 边界、`tool/call` | 不投影 | 请求与过程记录，只进日志 |
 
 `tool/call` 单独说一句：它记录模型请求调用工具这件事本身，含参数原文，但不投影成消息。模型不需要被告知它自己请求过什么，`assistant/message` 里的 tool_calls 已经携带了这份信息。日志保留它是给审计和界面用的。这正是日志要全、消息要精的典型体现。
 
@@ -139,48 +139,28 @@ def _derive_event_message(event: SessionEvent) -> Message | None:
 第 02 章的循环直接操作 `history` 列表。日志化之后，循环的每一步都变成追加一条事件：
 
 ```python
-def run_agent(client, tools, system_prompt, user_prompt, max_turns=10) -> Session:
+def run_agent(client, tools, system_prompt, user_prompt, max_steps=10) -> Session:
     tools_by_name = {tool.name: tool for tool in tools}
     session = Session()
 
     session.append("turn/start", {"turn": 1})
     session.append("user/message", {"content": user_prompt})
 
-    for turn in range(max_turns):
-        # 模型看到的历史永远是日志的投影，不是日志本身
-        messages = [
-            Message(role="system", content=system_prompt),
-            *session.derive_messages(),
-        ]
-        reply = client.chat(messages, tools)
-        session.append(
-            "assistant/message",
-            {
-                "content": reply.content,
-                "tool_calls": [
-                    {"id": c.id, "name": c.name, "arguments": c.arguments}
-                    for c in reply.tool_calls
-                ],
-            },
-        )
-
-        if not reply.tool_calls:
-            session.append("turn/end", {"turn": 1, "reason": "completed"})
-            return session
-
-        for call in reply.tool_calls:
-            session.append(
-                "tool/call",
-                {"call_id": call.id, "name": call.name, "arguments": call.arguments},
-            )
-            # 执行工具，结果追加为 tool/result，错误同样回灌
+    session.append("request/header", {"header": {"system": system_prompt, ...}})
+    for step in range(1, max_steps + 1):
+        session.append("step/start", {"turn": 1, "step": step})
+        try:
+            # 投影历史 → 请求模型 → 记录 assistant 与工具事件
+            ...
+        finally:
+            session.append("step/end", {"turn": 1, "step": step})
     # ...
 ```
 
 两个结构性变化：
 
-1. 系统提示词不进日志。`messages` 的第一条 system 消息由循环在请求前组装，不 append 进 Session。它属于模型行为配置，不是对话中发生的交互。官方同样把 system 与工具清单作为请求 envelope 的一部分单独管理，第 06 章会继续展开。
-2. `turn/start` 与 `turn/end` 夹住一轮。轮次是一次唤醒到完成的边界，这个边界在第 07 章与第 09 章里都会用到，压缩只发生在轮次边界，因为只有边界处历史是安静的。
+1. system 与工具 schema 不作为 surface 消息投影，但会进入 `request/header`。恢复时因此能重建 provider、model、system 与 tools，而不是只剩聊天文本。
+2. `turn/start/end` 夹住一次唤醒，`step/start/end` 夹住一次模型调用与工具执行。`finally` 保证异常路径也会关闭 step。
 
 ## 5.6 重放：从日志重建一切
 
@@ -195,11 +175,12 @@ def run_agent(client, tools, system_prompt, user_prompt, max_turns=10) -> Sessio
                 raise ValueError(
                     f"重放失败：第 {index} 个事件 id 为 {event.id}（应为 {index}）"
                 )
-            session._log.append(event)
+            frozen_data = _freeze_json(event.data)
+            session._log.append(SessionEvent(..., data=frozen_data))
         return session
 ```
 
-校验 id 连续性是为了及时发现日志缺失。无论原因是文件损坏还是手动修改，只要日志不完整，重放就应立即报告错误，而不是带着残缺历史继续运行。官方的校验更严格，除了序号，还会校验轮次闭合以及工具调用与结果是否配对。
+恢复边界不能信任磁盘输入。`from_log` 除了检查连续 id，还会重新验证事件类型、时间戳和 lossless JSON，并重新冻结 `data`。官方 invariant 模块再进一步校验 turn/step 闭合以及工具调用与结果配对。
 
 重放能力在官方手里有三处大用：崩溃恢复，从落盘日志重建会话继续跑；会话 fork，子 agent 以父对话的已完成前缀为一次性种子，第 14 章对照官方说明这一机制；以及调试，回放一次运行看它每一步做了什么。本章 demo 演示最基础的形态，同一份日志重建出完全相同的消息历史。
 
@@ -244,17 +225,17 @@ uv run python chapters/05-session-log/src/demo.py
 - `SessionEvent`：日志最小单位，id 连续、frozen
 - `Session.append`：唯一写入路径，校验、冻结、快照失效、通知订阅者
 - `derive_messages`：投影规则，三种事件进模型，其余只进日志
-- 循环日志化：turn/start 到 turn/end 的完整事件序列
-- `from_log`：重放入口，id 连续性校验、响亮失败
+- 循环日志化：request/header、turn/step 边界和工具配对
+- `from_log`：连续 id、数据校验与重新冻结
 
 ## 对照官方
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/core/session/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/core/session/README.zh.md) | `Session` | 事件溯源定义在第 5 行，append 快照加冻结在第 39 行，events 缓存快照在第 43 行，与本章一致 |
-| 同上，第 40-41 行 | `derive_messages` | 官方做增量投影，每个 surface 节点只投影一次，教学版每次全量。日志小时无差别，长会话是第 09 章压缩的伏笔 |
-| 同上，第 11 行 | `subscribe` | 官方持久化插件订阅 session/event 并在 flush 时落盘，第 08 章会使用这一接口 |
-| [`packages/core/agent-loop/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/core/agent-loop/README.zh.md) | 循环日志化 | 官方第 105 行同样写明已接纳的消息与工具调用记录并在后续 step 发送，原始流分片仅写日志 |
+| [`packages/core/session/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/core/session/README.zh.md) | `Session` | 对齐事件溯源、append 时分离并冻结数据，以及不可由调用方污染的 events 快照 |
+| 同上 | `derive_messages` | 官方做增量投影，每个 surface 节点只投影一次；教学版每次全量，长会话成本更高 |
+| 同上 | `subscribe` | 官方持久化插件订阅 session/event，并在 flush 时落盘；第 08 章实现文件存储 |
+| [`packages/core/agent-loop/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/core/agent-loop/README.zh.md) | 循环日志化 | 官方同样把已接纳消息、请求边界与工具调用写入日志，在后续 step 重建模型输入 |
 
 ## 练习
 

@@ -16,13 +16,13 @@ def run_agent(
     tools: list[Tool],
     system_prompt: str,
     user_prompt: str,
-    max_turns: int = 10,
+    max_steps: int = 10,
 ) -> list[Message]:
     """跑一轮带工具调用的对话，返回完整历史（最后一条是模型的最终回答）。
 
     终止条件（教学版只保留最核心的两条）：
     1. 模型不再请求工具 —— 任务完成，返回历史；
-    2. 达到 max_turns —— 安全阀，防止模型陷入「永远要调工具」的死循环。
+    2. 达到 max_steps —— 安全阀，防止模型陷入「永远要调工具」的死循环。
     """
     tools_by_name = {tool.name: tool for tool in tools}
     history: list[Message] = [
@@ -30,7 +30,7 @@ def run_agent(
         Message(role="user", content=user_prompt),
     ]
 
-    for turn in range(max_turns):
+    for _step in range(max_steps):
         reply = client.chat(history, tools)
         history.append(reply)
 
@@ -54,4 +54,4 @@ def run_agent(
                 Message(role="tool", content=result, tool_call_id=call.id)
             )
 
-    raise RuntimeError(f"Agent 在 {max_turns} 轮内没有结束")
+    raise RuntimeError(f"Agent 在 {max_steps} 个 step 内没有结束")
