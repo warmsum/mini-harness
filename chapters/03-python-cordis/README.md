@@ -198,11 +198,7 @@ ctx.effect(lambda: stop_task)
 
 这里有两个点要解释清楚：
 
-为什么多套一层 `lambda`？`effect` 会立即调用收到的启动函数。如果直接写
-`ctx.effect(stop_task)`，它会把 `stop_task` 误当作启动函数并立即执行，得到的
-`None` 也不是清理函数。包一层 `lambda: stop_task` 后，`effect` 调用 lambda
-得到的是 `stop_task` 函数本身，并不会执行它，于是可以把它登记进清理清单。
-简单说，effect 的参数描述怎么启动，返回值描述怎么停止。
+为什么多套一层 `lambda`？`effect` 会立即调用收到的启动函数。如果直接写 `ctx.effect(stop_task)`，它会把 `stop_task` 误当作启动函数并立即执行，得到的 `None` 也不是清理函数。包一层 `lambda: stop_task` 后，`effect` 调用 lambda 得到的是 `stop_task` 函数本身，并不会执行它，于是可以把它登记进清理清单。简单说，effect 的参数描述怎么启动，返回值描述怎么停止。
 
 为什么清理不能靠自觉？插件作者在插件函数末尾手写清理逻辑。插件可能提前 `return`、可能中途抛异常、可能被别的插件卸载，每一条路径都要记得清理，漏一条就是资源泄漏。effect 把清理交给句柄统一执行，作者只需要在创建资源的同一行交出清理方式。官方 cordis 的 effect 正是同一设计，所有副作用都从这一个入口进入，卸载时统一回收。
 
@@ -310,6 +306,8 @@ uv run python chapters/03-python-cordis/src/demo.py
 - `_current` 的轨迹：heartbeat 安装时指向 heartbeat，进到 child 的安装时切换为 child，child 装完恢复 heartbeat，heartbeat 装完恢复 `None`。3.3 节的 `try/finally` 保证这条轨迹任何情况下都能走完。
 
 ## 本章小结
+
+本章的 mini-cordis 不是只供 demo 使用的孤立模型。第 17 章会在 `mini_harness/cordis.py` 中保留这里的生命周期、effect 和级联语义，再加入第 04 章的服务依赖，让模型、Session、Prompt、工具和策略真正通过插件 Bundle 组装。两个章节各自保留源码副本，是为了能够独立运行和循序阅读，而不是采用两套不同架构。
 
 - `Context`：插件的家，句柄登记簿加事件总线加 `_current` 安装标记
 - `PluginHandle`：一次安装的一生，状态机、清理清单、逆序卸载

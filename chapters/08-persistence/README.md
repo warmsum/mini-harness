@@ -4,7 +4,7 @@
 
 第 05 章的会话日志目前只保存在内存中，程序退出后历史就会丢失。要支持崩溃恢复、稍后继续或迁移会话，事件日志必须写入磁盘。本章实现一个文件存储，并说明第 05 章 `subscribe` 接口如何用于增量持久化。
 
-DeepSeek Harness 将这项能力实现为独立后端包 session-persistence-jsonl，采用 JSONL 格式：首行是文件头，之后每行保存一个 JSON 对象。JSONL 易于跨语言读取，也便于直接检查；尾部单行损坏时，前面的完整记录仍可恢复。官方默认还支持 zstd 压缩和分片打包，教学版只保留未压缩的 JSONL，以便观察核心流程。
+DeepSeek Harness 将这项能力实现为独立后端包 session-persistence-jsonl，采用 JSONL 格式：首行是文件头，之后每行保存一个 JSON 对象。JSONL 易于跨语言读取，也便于直接检查；尾部单行损坏时，前面的完整记录仍可恢复。仅在任务结束时保存仍然不够，模型请求和工具副作用可能已经发生，所以本章还加入语义 checkpoint，在不可逆动作之前先把执行意图落盘。官方默认还支持 zstd 压缩和分片打包，教学版只保留未压缩的 JSONL，以便观察核心流程。
 
 ## 学习目标
 
@@ -13,7 +13,8 @@ DeepSeek Harness 将这项能力实现为独立后端包 session-persistence-jso
 - 把 `SessionEvent` 按 JSONL 格式写入文件并重新加载；
 - 首次创建时原子发布，后续只追加尚未落盘的事件；
 - 校验文件头、格式版本和事件编号；
-- 识别残缺尾行，并在恢复出的 Session 中为未闭合工具、step 与 turn 补充崩溃收尾事件。
+- 识别残缺尾行，并在恢复出的 Session 中为未闭合工具、step 与 turn 补充崩溃收尾事件；
+- 在模型请求、顶层工具副作用、下一 step 和 retry 退避之前执行 fail-closed checkpoint。
 
 ## 8.1 三个必须回答的问题
 
@@ -72,11 +73,41 @@ class JsonlStore:
 
 1. 文件不存在直接抛 `FileNotFoundError`，调用方不该拿到一个空会话假装一切正常。
 2. header 校验失败立即抛错。读到别人的文件、未来版本的文件，都该响亮失败而不是猜。
-3. `_read_records` 只把末尾未换行片段标为 torn tail；完整坏行一律报错。截断后，加载器总会扫描开放状态，并依次合成缺失的 `tool/result`、`step/end` 和真实 turn 编号的 `turn/end`，不会再写死 `turn=0`。这一步不能只在出现 torn tail 时执行：进程也可能恰好在一条完整事件写完后、收尾事件写入前崩溃。
+3. `_read_records` 只把末尾未换行片段标为 torn tail；完整坏行一律报错。截断后，加载器总会扫描开放状态，并依次合成缺失的 `tool/result`、`step/end` 和真实 turn 编号的 `turn/end`，不会再写死 `turn=0`。已落盘的 `tool/call` 没有结果时，合成结果使用 `TOOL_OUTCOME_UNKNOWN`：只读或幂等操作可以重试，有副作用的操作必须先核对外部状态或询问用户，不能断言工具一定“已中断”。这一步不能只在出现 torn tail 时执行：进程也可能恰好在一条完整事件写完后、收尾事件写入前崩溃。
 
 最后，`Session.from_log` 继续执行第 05 章建立的 id 连续性校验。
 
-## 8.4 运行完整示例
+## 8.4 语义 checkpoint：先持久化意图，再执行动作
+
+`save()` 回答“怎样持久化”，CheckpointPolicy 回答“什么时候必须持久化”。官方 checkpoint policy 在模型请求、顶层工具和 pre-step 三个边界 flush。教学版没有常驻持久化协调器，因此还把 retry 调度事件落盘作为第四个显式边界：
+
+```python
+@dataclass(frozen=True)
+class CheckpointPolicy:
+    flush: Callable[[Session], None]
+
+    def before_model(self, session: Session) -> None:
+        self.flush(session)
+
+    def before_tool(self, session: Session, *, nested: bool = False) -> None:
+        if not nested:
+            self.flush(session)
+
+    def before_step(self, session: Session) -> None:
+        self.flush(session)
+
+    def before_retry(self, session: Session) -> None:
+        self.flush(session)
+```
+
+- `before_model`：完整请求前缀先落盘，随后才能调用 provider；
+- `before_tool`：`tool/call` 先落盘，随后才能进入顶层工具正文；嵌套分派复用外层 checkpoint，避免重复 flush；
+- `before_step`：上一条 assistant 响应和有序工具结果先落盘，下一 step 才能从它们派生请求。
+- `before_retry`：`llm/retry` 调度事件先落盘，随后才进入退避等待。
+
+四个方法都不吞 `flush` 异常。保存失败时，调用方不能继续调用模型、执行工具或开始 retry 退避，这叫 fail-closed。checkpoint 保证“执行意图先于动作持久化”，方便崩溃后判断发生到了哪里；它不保证外部副作用恰好一次，因为进程仍可能在工具已经写入远端、结果尚未落盘时崩溃。
+
+## 8.5 运行完整示例
 
 ```bash
 uv run python chapters/08-persistence/src/demo.py
@@ -98,7 +129,11 @@ uv run python chapters/08-persistence/src/demo.py
 === ② 读回：重放一致性 ===
   读回 6 条事件，类型序列与原始一致: True
 
-=== ③ 模拟崩溃：最后一条 turn/end 还没写，进程就被杀 ===
+=== ③ checkpoint：工具意图先落盘，副作用后执行 ===
+  副作用前磁盘末事件: tool/call
+  ← flush 失败时，调用方不会进入工具正文
+
+=== ④ 模拟崩溃：最后一条 turn/end 还没写，进程就被杀 ===
   #0  turn/start
   #1  user/message
   #2  assistant/message
@@ -108,12 +143,13 @@ uv run python chapters/08-persistence/src/demo.py
   ← 残缺尾行被截断，缺失的轮次收尾被合成 turn/end 补上
 ```
 
-第 ③ 节由 demo 主动制造损坏：先删除最后一行 turn/end，模拟轮次尚未写完；再追加半行，模拟进程在写事件时退出。加载器会截断磁盘上的残缺片段，并在返回的内存 Session 中合成收尾事件。即使磁盘末尾是完整行，只要工具、step 或 turn 仍开放，也会合成相同的崩溃收尾。合成事件不会在 `load()` 内自动写回；调用方随后对恢复出的 Session 执行 `save()`，它们才会追加到磁盘。
+第 ③ 节先追加一个 `tool/call`，通过 CheckpointPolicy 保存，再读回磁盘确认工具意图已经存在。第 ④ 节由 demo 主动制造损坏：先删除最后一行 turn/end，模拟轮次尚未写完；再追加半行，模拟进程在写事件时退出。加载器会截断磁盘上的残缺片段，并在返回的内存 Session 中合成收尾事件。即使磁盘末尾是完整行，只要工具、step 或 turn 仍开放，也会合成相同的崩溃收尾。合成事件不会在 `load()` 内自动写回；调用方随后对恢复出的 Session 执行 `save()`，它们才会追加到磁盘。
 
 ## 本章小结
 
 - `JsonlStore.save()`：首次原子发布、前缀校验、后续仅追加
 - `JsonlStore.load()`：严格 header/事件校验，只截断 torn tail，并始终按开放状态合成工具/step/turn 收尾
+- `CheckpointPolicy`：模型、顶层工具、下一 step 和 retry 退避四个 flush 边界，失败时不越过屏障
 - 三层防御加 `from_log` 连续性校验的完整恢复链
 
 ## 对照官方
@@ -124,6 +160,7 @@ uv run python chapters/08-persistence/src/demo.py
 | 同上 | `save` | 两者都首次原子发布、随后仅追加；官方额外实现批量 append、写失败回滚与跨平台发布细节 |
 | 同上 | （未实现） | 官方还会打包连续流式分片并支持 zstd 压缩；这些是存储优化，教学版不实现 |
 | 同上 | 崩溃修复 | 教学版只截断真正不完整的尾部，再按开放状态合成工具、step 与 turn closer；中间损坏响亮失败 |
+| [`packages/session/session-checkpoint-policy/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/session/session-checkpoint-policy/README.zh.md) | `CheckpointPolicy` | 模型请求、顶层工具与 pre-step 对齐官方；教学版没有常驻 batching controller，所以额外显式 flush `llm/retry` 后的退避边界 |
 
 官方还用协调器订阅 session/event、按窗口批量 flush，并以 zstd checksum frame 作为默认物理格式；教学版由调用方显式 `save()`，每次把尚未保存的尾部追加进去。
 

@@ -8,8 +8,8 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -34,16 +34,29 @@ class PromptAssembler:
         self._sections: list[PromptSection] = []
         self._variables: dict[str, Callable[[], str]] = {}
 
-    def section(self, name: str, text: str, order: int = 0) -> None:
+    def section(self, name: str, text: str, order: int = 0) -> Callable[[], None]:
         """贡献一段提示词。同层同名段会立即报错。"""
         if any(section.name == name for section in self._sections):
             raise ValueError(f'提示词段 "{name}" 已被注册')
-        self._sections.append(PromptSection(order=order, name=name, text=text))
+        contribution = PromptSection(order=order, name=name, text=text)
+        self._sections.append(contribution)
 
-    def variable(self, name: str, provider: Callable[[], str]) -> None:
+        def remove() -> None:
+            if contribution in self._sections:
+                self._sections.remove(contribution)
+
+        return remove
+
+    def variable(self, name: str, provider: Callable[[], str]) -> Callable[[], None]:
         if name in self._variables:
             raise ValueError(f'提示词变量 "{name}" 已被注册')
         self._variables[name] = provider
+
+        def remove() -> None:
+            if self._variables.get(name) is provider:
+                del self._variables[name]
+
+        return remove
 
     def render(self, variables: dict[str, str] | None = None) -> str:
         """按 order 排序拼接全部段，并替换 {{变量}} 占位符。

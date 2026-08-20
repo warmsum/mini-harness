@@ -17,7 +17,12 @@ from client import DeepSeekClient, Message, Tool
 from inbox import Inbox
 from prompt import PromptAssembler
 from registry import ToolRegistry
+from retry import RetryPolicy
 from session import Session
+
+
+class _EmptyResponseError(RuntimeError):
+    code = "EMPTY_RESPONSE"
 
 
 class Agent:
@@ -27,6 +32,7 @@ class Agent:
         registry: ToolRegistry,
         assembler: PromptAssembler,
         variables: dict[str, str] | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         self._client = client
         self._registry = registry
@@ -36,6 +42,7 @@ class Agent:
         self._session = Session()
         self._turn_no = 0
         self._request_header: str | None = None
+        self._retry_policy = retry_policy
 
     # ------------------------------------------------------------------
     # 外部入口：投递消息
@@ -122,7 +129,27 @@ class Agent:
                     Message(role="system", content=system_prompt),
                     *self._session.derive_messages(),
                 ]
-                reply = self._client.chat(messages, tools)
+                while True:
+                    try:
+                        reply = self._client.chat(messages, tools)
+                        if (
+                            not reply.content
+                            and not reply.reasoning_content
+                            and not reply.tool_calls
+                        ):
+                            raise _EmptyResponseError(
+                                "model returned a completed response with no content"
+                            )
+                    except Exception as error:
+                        if self._retry_policy is None or not self._retry_policy.recover(
+                            self._session,
+                            turn=self._turn_no,
+                            step=step,
+                            error=error,
+                        ):
+                            raise
+                        continue
+                    break
                 self._session.append(
                     "assistant/message",
                     {

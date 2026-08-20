@@ -13,12 +13,15 @@ DeepSeek 没有专用搜索端点，Web Search 是一次携带 web_search
 
 from __future__ import annotations
 
+import os
 import re
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
 
 import httpx
+from dotenv import dotenv_values
 
 # 官方默认值（web-search-deepseek 配置表）
 SEARCH_BASE_URL = "https://api.deepseek.com/anthropic/v1"
@@ -26,6 +29,18 @@ SEARCH_MODEL = "deepseek-v4-flash"
 ANTHROPIC_VERSION = "2023-06-01"
 WEB_SEARCH_TOOL = "web_search_20250305"
 SEARCH_MAX_QUERIES = 4
+
+
+def load_api_key() -> str:
+    """按「环境变量优先，其次项目根目录 .env」读取 DeepSeek API Key。"""
+    from_env = os.getenv("DEEPSEEK_API_KEY")
+    if from_env:
+        return from_env
+    env_path = Path(__file__).resolve().parents[3] / ".env"
+    from_file = dotenv_values(env_path).get("DEEPSEEK_API_KEY")
+    if from_file:
+        return from_file
+    raise RuntimeError("找不到 DEEPSEEK_API_KEY：请参考 .env.example 创建 .env")
 
 
 @dataclass(frozen=True)
@@ -60,8 +75,6 @@ class WebSearchClient:
         model: str = SEARCH_MODEL,
     ) -> None:
         if api_key is None:
-            from client import load_api_key
-
             api_key = load_api_key()
         self.api_key = api_key
         self.base_url = base_url

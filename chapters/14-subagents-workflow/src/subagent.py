@@ -12,9 +12,11 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any
+from threading import Event, Lock
+from typing import Any, Protocol
+from uuid import uuid4
 
 from client import DeepSeekClient, Message, Tool
 from session import Session
@@ -33,31 +35,53 @@ class SubagentResult:
     diagnostic: str | None = None
 
 
+class CancellationSignal(Protocol):
+    def is_set(self) -> bool: ...
+
+
+class _EitherCancellation:
+    def __init__(self, first: CancellationSignal, second: CancellationSignal) -> None:
+        self._first = first
+        self._second = second
+
+    def is_set(self) -> bool:
+        return self._first.is_set() or self._second.is_set()
+
+
 def run_subagent(
     client: DeepSeekClient,
     task: str,
     system_prompt: str,
     max_steps: int = 3,
+    session: Session | None = None,
+    cancelled: CancellationSignal | None = None,
 ) -> SubagentResult:
     """运行一个子 agent：独立的 Session，只见 task，不见父历史。
 
     上下文隔离是这里的关键——父 agent 的对话历史可能有几万 token，
     而一个子任务往往只需要一句 task 描述。把历史挡在门外，
     每个子 agent 的输入都从零开始（官方 fork 是例外，见本章对照表）。"""
-    session = Session()
-    session.append("turn/start", {"turn": 1})
-    session.append("user/message", {"content": task})
+    child_session = session or Session()
+    turn = 1 + sum(1 for event in child_session.events if event.type == "turn/start")
+    child_session.append("turn/start", {"turn": turn})
+    child_session.append("user/message", {"content": task})
 
     partial: str = ""
     try:
         for _step in range(max_steps):
+            if cancelled is not None and cancelled.is_set():
+                child_session.append("turn/end", {"turn": turn, "reason": "interrupted"})
+                return SubagentResult(partial, "interrupted")
             reply = client.chat(
                 [
                     Message(role="system", content=system_prompt),
-                    *session.derive_messages(),
+                    *child_session.derive_messages(),
                 ]
             )
-            session.append(
+            if cancelled is not None and cancelled.is_set():
+                child_session.append("turn/end", {"turn": turn, "reason": "interrupted"})
+                return SubagentResult(partial, "interrupted")
+            child_session.append(
                 "assistant/message",
                 {
                     "content": reply.content,
@@ -71,9 +95,9 @@ def run_subagent(
             )
             partial = reply.content or ""
             if reply.content:
-                session.append("turn/end", {"turn": 1, "reason": "completed"})
+                child_session.append("turn/end", {"turn": turn, "reason": "completed"})
                 return SubagentResult(output=reply.content, stop_reason="completed")
-        session.append("turn/end", {"turn": 1, "reason": "max-steps"})
+        child_session.append("turn/end", {"turn": turn, "reason": "max-steps"})
         return SubagentResult(
             output=partial,
             stop_reason="max-steps",
@@ -81,14 +105,137 @@ def run_subagent(
     except Exception as error:
         # 失败保留部分文本：被截断的回答不会被报告为成功，
         # 也不会被悄悄丢弃。
-        session.append(
-            "turn/end", {"turn": 1, "reason": "error", "message": str(error)}
-        )
+        child_session.append("turn/end", {"turn": turn, "reason": "error", "message": str(error)})
         return SubagentResult(
             output=partial,
             stop_reason="error",
             diagnostic=str(error),
         )
+
+
+def fork_session(parent: Session) -> Session:
+    """复制父日志的最后完整 turn 前缀；当前开放 turn 完全排除。"""
+    last_turn_end = -1
+    for index, event in enumerate(parent.events):
+        if event.type == "turn/end":
+            last_turn_end = index
+    if last_turn_end < 0:
+        return Session()
+    return Session.from_log(parent.events[: last_turn_end + 1])
+
+
+class ContinuableSubagent:
+    """有独立 Session 的可继续子 Agent；消息由单线程队列按 FIFO 执行。"""
+
+    def __init__(
+        self,
+        client: DeepSeekClient,
+        system_prompt: str,
+        *,
+        seed: Session | None = None,
+        id: str | None = None,
+    ) -> None:
+        self.id = id or f"child-{uuid4().hex}"
+        self._client = client
+        self._system_prompt = system_prompt
+        self._session = seed or Session()
+        self._cancelled = Event()
+        self._state_lock = Lock()
+        self._executor = ThreadPoolExecutor(max_workers=1)
+        self._status = "idle"
+        self._closed = False
+
+    @property
+    def session(self) -> Session:
+        return self._session
+
+    @property
+    def status(self) -> str:
+        with self._state_lock:
+            return self._status
+
+    def submit_message(
+        self, content: str, cancelled: CancellationSignal | None = None
+    ) -> Future[SubagentResult]:
+        """接收一条后续消息并立即返回；单 worker 保证投递顺序。"""
+        if not content.strip():
+            raise ValueError("content 必须是非空字符串")
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("subagent 已关闭")
+            return self._executor.submit(self._run_message, content, cancelled)
+
+    def send_message(
+        self, content: str, cancelled: CancellationSignal | None = None
+    ) -> SubagentResult:
+        """同步章节 API：仍走同一 FIFO 队列，但等待这一条消息完成。"""
+        return self.submit_message(content, cancelled).result()
+
+    def _run_message(self, content: str, cancelled: CancellationSignal | None) -> SubagentResult:
+        with self._state_lock:
+            if self._closed:
+                return SubagentResult("", "interrupted")
+            self._cancelled.clear()
+            self._status = "running"
+        signal: CancellationSignal = self._cancelled
+        if cancelled is not None:
+            signal = _EitherCancellation(self._cancelled, cancelled)
+        result = run_subagent(
+            self._client,
+            content,
+            self._system_prompt,
+            session=self._session,
+            cancelled=signal,
+        )
+        with self._state_lock:
+            self._status = "interrupted" if result.stop_reason == "interrupted" else "idle"
+        return result
+
+    def interrupt(self) -> None:
+        self._cancelled.set()
+
+    def close(self) -> None:
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+        self.interrupt()
+        self._executor.shutdown(wait=True, cancel_futures=True)
+
+
+class SubagentManager:
+    """按 owner 管理 continuable 子 Agent，隔离兄弟和其他根 Agent。"""
+
+    def __init__(self, client: DeepSeekClient, system_prompt: str) -> None:
+        self._client = client
+        self._system_prompt = system_prompt
+        self._children: dict[str, tuple[str, ContinuableSubagent]] = {}
+
+    def create(
+        self,
+        owner_id: str,
+        *,
+        parent_session: Session | None = None,
+        fork: bool = False,
+    ) -> ContinuableSubagent:
+        seed = fork_session(parent_session) if fork and parent_session is not None else None
+        child = ContinuableSubagent(self._client, self._system_prompt, seed=seed)
+        self._children[child.id] = (owner_id, child)
+        return child
+
+    def get(self, owner_id: str, child_id: str) -> ContinuableSubagent:
+        record = self._children.get(child_id)
+        if record is None or record[0] != owner_id:
+            raise KeyError("subagent 不存在或不属于当前 owner")
+        return record[1]
+
+    def list(self, owner_id: str) -> tuple[ContinuableSubagent, ...]:
+        return tuple(child for owner, child in self._children.values() if owner == owner_id)
+
+    def close(self) -> None:
+        for _owner, child in self._children.values():
+            child.close()
+        self._children.clear()
 
 
 def run_subagents_parallel(
@@ -105,19 +252,17 @@ def run_subagents_parallel(
         return []
     with ThreadPoolExecutor(max_workers=len(specs)) as pool:
         futures = [
-            pool.submit(run_subagent, client, task, system_prompt)
-            for task, system_prompt in specs
+            pool.submit(run_subagent, client, task, system_prompt) for task, system_prompt in specs
         ]
         return [future.result() for future in futures]
 
 
-def create_subagent_tool(
-    client: DeepSeekClient, child_system_prompt: str
-) -> Tool:
+def create_subagent_tool(client: DeepSeekClient, child_system_prompt: str) -> Tool:
     """把 run_subagent 包装成第 02 章风格的 Tool。
 
     官方把「委派」做成一个基于已配置 provider 的模型工具——模型在需要
     拆分任务时主动调用它，参数就是子任务描述。"""
+
     def execute(args: dict[str, Any]) -> str:
         task = args.get("task")
         if not isinstance(task, str) or not task.strip():

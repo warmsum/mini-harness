@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Protocol
 
 import httpx
 from dotenv import dotenv_values, find_dotenv
@@ -55,8 +55,8 @@ class ToolCall:
     规定：模型生成的参数是文本，必须先 json.loads 解析才能执行。
     """
 
-    id: str       # 调用编号，工具结果回灌时靠它一一对应
-    name: str     # 要调用的工具名
+    id: str  # 调用编号，工具结果回灌时靠它一一对应
+    name: str  # 要调用的工具名
     arguments: str  # 参数 JSON 字符串，例如 '{"expression": "1+2*3"}'
 
 
@@ -89,6 +89,16 @@ class Tool:
     description: str
     parameters: dict[str, Any]  # JSON Schema，描述参数长什么样
     execute: Callable[[dict[str, Any]], str]
+
+
+class ChatClient(Protocol):
+    """LLM service definition；provider 只需满足这条结构化接口。"""
+
+    MODEL: str
+
+    def chat(
+        self, messages: list[Message], tools: list[Tool] | None = None
+    ) -> Message: ...
 
 
 # ---------------------------------------------------------------------------
@@ -181,8 +191,9 @@ class DeepSeekClient:
     async def stream(self, messages: list[Message]) -> AsyncIterator[str]:
         """流式调用：只处理纯文本回答的展示。工具调用场景见 README 对照。"""
         completed = False
-        async with httpx.AsyncClient(timeout=60) as client:
-            async with aconnect_sse(
+        async with (
+            httpx.AsyncClient(timeout=60) as client,
+            aconnect_sse(
                 client,
                 "POST",
                 f"{self.BASE_URL}/chat/completions",
@@ -195,15 +206,16 @@ class DeepSeekClient:
                     "messages": [self._wire_message(m) for m in messages],
                     "stream": True,
                 },
-            ) as event_source:
-                async for event in event_source.aiter_sse():
-                    if event.data == "[DONE]":
-                        completed = True
-                        break
-                    payload = json.loads(event.data)
-                    delta = payload["choices"][0].get("delta", {})
-                    piece = delta.get("content")
-                    if piece:
-                        yield piece
+            ) as event_source,
+        ):
+            async for event in event_source.aiter_sse():
+                if event.data == "[DONE]":
+                    completed = True
+                    break
+                payload = json.loads(event.data)
+                delta = payload["choices"][0].get("delta", {})
+                piece = delta.get("content")
+                if piece:
+                    yield piece
         if not completed:
             raise RuntimeError("流式响应在 [DONE] 之前中断，拒绝保存不完整消息")

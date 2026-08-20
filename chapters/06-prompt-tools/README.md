@@ -140,11 +140,7 @@ def run_agent(client, registry, assembler, user_prompt,
         # ...其余与第 05 章相同
 ```
 
-至此，请求 envelope 中的 system 由组装器生成，tools 由注册表提供。每个
-step 都重新渲染 prompt，因此变量 provider 的运行时变化能在下一次模型调用
-生效；只有 envelope 真正变化时才追加新的 `request/header`。循环不再需要
-知道提示词由几段组成，也不关心工具由哪个模块注册。第 03 章提出的职责拆分
-在这里落到请求组装流程中。
+至此，请求 envelope 中的 system 由组装器生成，tools 由注册表提供。每个 step 都重新渲染 prompt，因此变量 provider 的运行时变化能在下一次模型调用生效；只有 envelope 真正变化时才追加新的 `request/header`。循环不再需要知道提示词由几段组成，也不关心工具由哪个模块注册。第 03 章提出的职责拆分在这里落到请求组装流程中。
 
 ## 6.5 运行完整示例
 

@@ -30,7 +30,7 @@ After completing the course, learners will be able to explain and implement:
 - how streaming response chunks become a complete message;
 - how a model requests a tool and receives the tool result in the next model call;
 - how session events are recorded, projected, persisted, recovered, and compacted;
-- how plugins and services start from declared dependencies and clean up in reverse order;
+- how model, tools, prompt, session, and runtime policies cooperate as plugins and clean up in reverse order;
 - how filesystem, shell, skills, goals, todo lists, and sub-agents connect to the runtime loop;
 - how a headless agent is assembled, runs a task, flushes state, and returns a final result.
 
@@ -91,7 +91,7 @@ An agent gains more capabilities as it grows. The plugin system coordinates thei
 
 | Chapter | Core question | Runtime |
 |---|---|---|
-| [03 · A minimal plugin system](chapters/03-python-cordis/README.md) | How does a plugin wait for dependencies, become active, and release its resources? | Local |
+| [03 · A minimal plugin system](chapters/03-python-cordis/README.md) | How is a plugin installed, activated, and disposed with its resources? | Local |
 | [04 · Services and dependencies](chapters/04-services-scopes/README.md) | How are services provided, duplicate names rejected, and dependencies resolved again after a provider changes? | Local |
 
 ### Part III: Build a persistent agent runtime
@@ -102,9 +102,9 @@ A single model call handles one request. A persistent agent also needs to record
 |---|---|---|
 | [05 · Session log](chapters/05-session-log/README.md) | How does an append-only event log reconstruct messages and preserve each run? | DeepSeek API |
 | [06 · Request envelope assembly](chapters/06-prompt-tools/README.md) | How do the system prompt, message history, and tool schemas become one model request? | DeepSeek API |
-| [07 · Resident agent and inbox](chapters/07-agent-inbox/README.md) | How do followup and steer target the next turn and the next step of the current turn? | DeepSeek API |
-| [08 · Session persistence](chapters/08-persistence/README.md) | How is a JSONL log published safely and recovered after a process restart? | Local |
-| [09 · Context engineering](chapters/09-context-engineering/README.md) | How does the runtime estimate token pressure and replace older history with a summary? | DeepSeek API |
+| [07 · Resident agent and inbox](chapters/07-agent-inbox/README.md) | How do followup, steer, and bounded LLM retries enter explicit boundaries? | DeepSeek API |
+| [08 · Session persistence](chapters/08-persistence/README.md) | How does JSONL recover a crash, and where are semantic checkpoints required? | Local |
+| [09 · Context engineering](chapters/09-context-engineering/README.md) | How do summaries, tool-result pruning, and spill control context size? | DeepSeek API |
 
 ### Part IV: Extend the agent's capabilities
 
@@ -115,40 +115,45 @@ Once the runtime loop is in place, the agent can interact with the local environ
 | [10 · Filesystem](chapters/10-filesystem/README.md) | How do path fences, read-before-write checks, and observations reduce accidental file changes? | Local |
 | [11 · Shell execution and approval](chapters/11-shell-sandbox/README.md) | How does a command pass through permissions, approval, timeouts, and result collection? | Local |
 | [12 · Skills and on-demand loading](chapters/12-instructions-skills/README.md) | How does a skill catalog expose summaries and load the full instructions only when selected? | Local |
-| [13 · Goal and Todo](chapters/13-goal-plan-todo/README.md) | How does a long-running task persist a goal revision and todo-list snapshots? | Local |
-| [14 · Subagent delegation](chapters/14-subagents-workflow/README.md) | How does a child agent receive isolated context and return partial or final results? | DeepSeek API |
+| [13 · Goal, Plan Mode, and Todo](chapters/13-goal-plan-todo/README.md) | How do durable task state, plan review, and structured user questions cooperate? | Local |
+| [14 · Subagents, Jobs, and Workflow](chapters/14-subagents-workflow/README.md) | How do isolated, forked, and continuable children run in foreground or background workflows? | DeepSeek API |
 | [15 · Web search and page fetching](chapters/15-external-capabilities/README.md) | How does an agent call DeepSeek Web Search and turn sources into usable context? | DeepSeek API + Web Search |
 
 ### Part V: Assemble the runtime boundary
 
-The final two chapters approach the system boundary from different directions. Chapter 16 teaches settings and RPC independently; chapter 17 assembles a command-line runner. The current capstone does not wire chapter 16's Settings or RPC into that command.
+The final two chapters approach the system boundary from different directions. Chapter 16 teaches settings and RPC independently; chapter 17 uses mini-Cordis to compose the model, session, prompt, tools, chapters 10–16, and runtime policies into one plugin tree. JSON-RPC uses newline-delimited stdio through `--rpc` and opens no listening port.
 
 | Chapter | Core question | Runtime |
 |---|---|---|
 | [16 · Settings and RPC](chapters/16-settings-jsonrpc/README.md) | How are layered settings settled, and how does JSON-RPC validate and dispatch requests? | Local |
-| [17 · Headless assembly](chapters/17-headless-capstone/README.md) | How do the client, agent, session persistence, and result settlement become a command-line program? | DeepSeek API |
+| [17 · Complete headless assembly](chapters/17-headless-capstone/README.md) | How does “everything is a plugin” connect chapters 10–16 and runtime policies to one agent? | DeepSeek API |
 
 ## How one task moves through the system
 
-Chapters 01, 02, 05, 06, 07, 08, 09, and 17 form the main execution path. The solid edges below are wired in chapter 17; compaction is demonstrated independently in chapter 09 and remains an integration point:
+Chapter 17 connects the prior mechanisms into one execution path. Model-based summary compaction remains an independent chapter 09 demonstration. Before each request, the capstone meters the system prompt, message surface, and tool schemas, then runs model-free tool-result pruning only at 80% pressure; spill remains at the tool-result boundary. Provider-overflow recovery is not wired in.
 
 ```mermaid
 flowchart TB
+    BUNDLE[Chapters 03/04 Context + Bundle<br>install providers, consumers, and policies] --> INBOX
     TASK[User task] --> INBOX[Chapter 07 inbox<br>accept followup / steer]
     INBOX --> LOOP[Chapter 07 agent loop<br>define turn / step boundaries]
-    LOOP --> ENV[Chapter 06 request envelope<br>assemble prompt, history, and tools]
-    ENV --> CALL[Chapters 01 and 02 model call<br>receive text or a tool request]
-    CALL -->|tool_calls| TOOLS[Chapter 02 tool execution]
-    TOOLS -->|tool result| LOOP
     LOOP --> LOG[Chapter 05 session log<br>append events and project messages]
-    LOG --> METER[Chapter 09 token metering]
-    METER -.->|optional extension| COMPACT[Chapter 09 compaction<br>not wired into chapter 17]
-    COMPACT -.-> LOG
-    LOG --> PERSIST[Chapter 08 persistence<br>write JSONL]
+    LOG --> METER[Chapter 09 token metering<br>system, surface, and tool schemas]
+    METER -->|pressure below 80%| ENV[Chapter 06 request envelope<br>assemble prompt, history, and tools]
+    METER -->|pressure at least 80%| PRUNE[Chapter 09 tool-result pruning]
+    PRUNE --> ENV
+    ENV --> CALL[Chapters 01 and 02 model call<br>receive a complete reply or a tool request]
+    CALL -->|failure| RETRY[Chapter 07 LLM retry<br>backoff, events, same-step retry]
+    RETRY --> CALL
+    CALL -->|final text| PERSIST
+    CALL -->|tool_calls| TOOLS[Chapters 10–16 tool catalog]
+    TOOLS --> SPILL[Chapter 09 spill<br>save full result, return preview]
+    SPILL --> LOG
+    LOG --> PERSIST[Chapter 08 checkpoints + JSONL<br>flush before requests and effects]
     PERSIST --> OUT[Chapter 17 result settlement<br>stdout and exit code]
 ```
 
-Chapters 03 and 04 provide plugin and dependency management, chapters 10 and 11 constrain local operations, and chapters 12 through 16 add optional capabilities. These mechanisms can be studied independently around the main execution path and connected when a larger runtime needs them.
+Chapters 03 and 04 are no longer isolated concepts. Chapter 17's `build_agent()` only mounts a plugin Bundle. Chapters 10–16 remain independently runnable and also register providers, consumers, or policies at the prompt, tool catalog, agent lifecycle, settings, or RPC boundary. A plugin is not necessarily a model tool: 24 tools enter the schema, while retry, checkpoints, the session, and the LLM provider do not.
 
 ## How each chapter works
 
@@ -180,7 +185,7 @@ The course aligns with DSH behavior, data flow, and lifecycle rather than TypeSc
 
 ## Official source baseline
 
-The course checks its mechanisms and terminology against the official DeepSeek Harness source. The current audit baseline is commit [`141eb6fef83422698aef7a981029e843e8161534`](https://github.com/deepseek-ai/DeepSeek-Harness/tree/141eb6fef83422698aef7a981029e843e8161534), dated 2026-08-19 and released as `0.1.0-rc.8`. Pinning the source keeps every conclusion reproducible. Each chapter identifies the upstream source, the semantics retained in Python, and the engineering features intentionally omitted for teaching.
+The course checks its mechanisms and terminology against the official DeepSeek Harness source. Its reference version is commit [`141eb6fef83422698aef7a981029e843e8161534`](https://github.com/deepseek-ai/DeepSeek-Harness/tree/141eb6fef83422698aef7a981029e843e8161534), dated 2026-08-19 and released as `0.1.0-rc.8`. Pinning the source keeps every conclusion reproducible. Each chapter identifies the upstream source, the semantics retained in Python, and the engineering features intentionally omitted for teaching.
 
 <details>
 <summary><strong>Open the source map for all 17 chapters</strong></summary>
@@ -203,7 +208,7 @@ The course checks its mechanisms and terminology against the official DeepSeek H
 | 14 | Subagent providers and delegation | `packages/subagent/subagent`, `packages/subagent/tool-subagent` |
 | 15 | Web capability seam | `packages/web/tool-web`, `packages/web/web-search-deepseek`, `packages/web/web-fetch-http` |
 | 16 | Settings and Typert gateway | `packages/settings/settings`, `packages/api/gateway` |
-| 17 | Headless runner | `packages/bundle/headless` |
+| 17 | Cordis Bundle and headless runner | `packages/bundle/base`, `packages/bundle/headless` |
 
 </details>
 
@@ -233,8 +238,8 @@ The path fence still runs inside an ordinary Python process and does not replace
 
 The 17 chapters leave several natural extensions:
 
-- add tool-result pruning before compaction in chapter 09;
-- implement forked sub-agents and workflow scripts in chapter 14;
+- wire chapter 09's model-based summary compaction and provider-overflow recovery into the capstone;
+- replace chapter 14's teaching Python workflow with the official Worker Thread JavaScript engine;
 - connect an MCP client and register external services as tools;
 - implement Code Mode, collapsing many tool interfaces into one code-execution entry point;
 - assemble streaming tool-call argument chunks in chapter 02;

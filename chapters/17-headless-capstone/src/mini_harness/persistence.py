@@ -18,6 +18,7 @@ from .session import Session, SessionEvent
 
 HEADER_FORMAT = "mini-harness-jsonl"
 HEADER_VERSION = 1
+TOOL_OUTCOME_UNKNOWN = "TOOL_OUTCOME_UNKNOWN"
 
 
 class JsonlStore:
@@ -47,7 +48,10 @@ class JsonlStore:
         if torn_offset is not None:
             raise ValueError("会话文件存在残缺尾行；请先 load() 修复后再保存")
         current = session.events
-        if len(persisted) > len(current) or tuple(persisted) != current[: len(persisted)]:
+        if (
+            len(persisted) > len(current)
+            or tuple(persisted) != current[: len(persisted)]
+        ):
             raise ValueError("会话文件不是当前日志的前缀，拒绝覆盖既有历史")
         pending = current[len(persisted) :]
         if not pending:
@@ -168,7 +172,13 @@ def _append_recovery_closers(events: list[SessionEvent]) -> None:
                 ts=timestamp,
                 data={
                     "call_id": call_id,
-                    "content": f"Error: 工具 {name!r} 因进程崩溃而中断",
+                    "content": (
+                        f"Error [{TOOL_OUTCOME_UNKNOWN}]: tool {name!r} was recorded, "
+                        "but no result was durably recorded. Its outcome is unknown. "
+                        "Retry only if the operation is read-only or idempotent; if it "
+                        "may have side effects, first verify external state or ask the "
+                        "user. Do not retry blindly."
+                    ),
                     "is_error": True,
                 },
             )

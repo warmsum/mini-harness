@@ -1,20 +1,26 @@
-"""第 09 章 demo：上下文压缩的完整旅程。
+"""第 09 章 demo：摘要、工具结果剪枝与 spill。
 
 运行（在项目根目录，需要 .env；压缩摘要由真实 DeepSeek 模型生成）：
     uv run python chapters/09-context-engineering/src/demo.py
 
 演示：
-1. 脚本构造一段长会话（不调用模型），压力逐轮爬升越过 80%；
-2. 触发压缩：真实模型重放前缀 + 官方压缩指令，产出 checkpoint；
-3. 替换后对比：消息数、token 数、占用率；
-4. 展示 checkpoint 的真实内容。
+1. 本地演示 append-only 工具结果剪枝；
+2. 本地演示大结果 spill 与预算内预览；
+3. 构造长会话，让上下文压力越过 80%；
+4. 调用真实模型生成摘要 checkpoint，并对比压缩前后。
 """
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 from client import DeepSeekClient, Message
 from compaction import compact
 from meter import TokenMeter
+from pruner import ToolResultPruner
+from session import Session
+from spill import LocalSpillStore, SpillPolicy
 
 # 教学用的小容量：4000 token 的「上下文窗口」，
 # 让压力阈值（80% = 3200）能被十几条消息轻松触及。
@@ -60,10 +66,43 @@ def build_long_conversation() -> list[Message]:
 
 
 def main() -> None:
+    print("=== ① 工具结果剪枝：表层变短，原事件仍保留 ===")
+    session = Session()
+    original = "BEGIN-" + "中间内容" * 80 + "-END"
+    session.append("tool/result", {"call_id": "call-1", "content": original})
+    pruned = ToolResultPruner(
+        threshold_chars=120,
+        head_chars=40,
+        tail_chars=20,
+    ).prune_session(session)
+    surface = session.derive_messages()[0].content or ""
+    print(f"  replacement: {pruned.replacements} 条")
+    print(f"  表层字符数: {len(original)} → {len(surface)}")
+    print(f"  原事件仍完整: {session.events[0].data['content'] == original}")
+
+    print()
+    print("=== ② spill：完整结果落盘，模型只收预算内预览 ===")
+    with tempfile.TemporaryDirectory() as tmp:
+        spill_text = "首部\n" + "数据行\n" * 300 + "尾部"
+        policy = SpillPolicy(512, LocalSpillStore(tmp))
+        inline = policy.transform(
+            spill_text,
+            session_id="demo-session",
+            tool_name="shell",
+            call_id="call-2",
+        )
+        stored = next(Path(tmp).rglob("*.txt"))
+        print(
+            f"  inline: {len(spill_text.encode('utf-8'))} → "
+            f"{len(inline.encode('utf-8'))} bytes"
+        )
+        print(f"  落盘内容完整: {stored.read_text(encoding='utf-8') == spill_text}")
+
     meter = TokenMeter(context_window=CONTEXT_WINDOW)
     messages = build_long_conversation()
 
-    print("=== ① 长会话逐轮计量：压力爬升 ===")
+    print()
+    print("=== ③ 长会话逐轮计量：压力爬升 ===")
     threshold_tokens = int(CONTEXT_WINDOW * 0.8)
     for index, message in enumerate(messages[1:], start=1):
         ratio = meter.measure(messages[: index + 1]).total_tokens / CONTEXT_WINDOW
@@ -73,14 +112,14 @@ def main() -> None:
     print(f"  阈值 = {threshold_tokens} token（{CONTEXT_WINDOW} × 0.8）")
 
     print()
-    print("=== ② 触发压缩：真实模型重放前缀 + 官方压缩指令 ===")
+    print("=== ④ 触发压缩：真实模型重放前缀 + 官方压缩指令 ===")
     before = meter.measure(messages)
     print(f"  压缩前：{len(messages)} 条消息，{before.total_tokens} token")
     result = compact(DeepSeekClient(), meter, messages)
     after = meter.measure(result.messages)
 
     print()
-    print("=== ③ 压缩结果 ===")
+    print("=== ⑤ 压缩结果 ===")
     print(f"  ok: {result.ok}（{result.reason}）")
     print(f"  被压缩区：{result.shadowed_count} 条消息，{result.shadowed_tokens} token")
     print(f"  checkpoint：{result.checkpoint_tokens} token（含 preamble 与标签）")
@@ -91,7 +130,7 @@ def main() -> None:
           f"{after.total_tokens / CONTEXT_WINDOW:.1%}")
 
     print()
-    print("=== ④ checkpoint 的真实内容（模型生成） ===")
+    print("=== ⑥ checkpoint 的真实内容（模型生成） ===")
     checkpoint = result.messages[1]
     print(f"  [role={checkpoint.role}]")
     for line in (checkpoint.content or "").splitlines()[:14]:

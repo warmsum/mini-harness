@@ -18,6 +18,7 @@ from session import Session, SessionEvent
 
 HEADER_FORMAT = "mini-harness-jsonl"
 HEADER_VERSION = 1
+TOOL_OUTCOME_UNKNOWN = "TOOL_OUTCOME_UNKNOWN"
 
 
 class JsonlStore:
@@ -118,18 +119,14 @@ class JsonlStore:
             if not isinstance(raw, dict) or set(raw) != {"id", "type", "ts", "data"}:
                 raise ValueError(f"会话文件第 {line_number} 行不是合法事件")
             events.append(
-                SessionEvent(
-                    id=raw["id"], type=raw["type"], ts=raw["ts"], data=raw["data"]
-                )
+                SessionEvent(id=raw["id"], type=raw["type"], ts=raw["ts"], data=raw["data"])
             )
         # 先走 Session 的连续 seq 与 lossless JSON 校验，再交还普通列表。
         return list(Session.from_log(events).events), torn_offset
 
 
 def _header_line() -> str:
-    return json.dumps(
-        {"format": HEADER_FORMAT, "version": HEADER_VERSION}, ensure_ascii=False
-    )
+    return json.dumps({"format": HEADER_FORMAT, "version": HEADER_VERSION}, ensure_ascii=False)
 
 
 def _event_line(event: SessionEvent) -> str:
@@ -168,7 +165,13 @@ def _append_recovery_closers(events: list[SessionEvent]) -> None:
                 ts=timestamp,
                 data={
                     "call_id": call_id,
-                    "content": f"Error: 工具 {name!r} 因进程崩溃而中断",
+                    "content": (
+                        f"Error [{TOOL_OUTCOME_UNKNOWN}]: tool {name!r} was recorded, "
+                        "but no result was durably recorded. Its outcome is unknown. "
+                        "Retry only if the operation is read-only or idempotent; if it "
+                        "may have side effects, first verify external state or ask the "
+                        "user. Do not retry blindly."
+                    ),
                     "is_error": True,
                 },
             )

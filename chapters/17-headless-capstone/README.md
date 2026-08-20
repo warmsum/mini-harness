@@ -1,182 +1,213 @@
-# 17｜headless 组装
+# 17｜Headless Agent 完整组装
 
-> 预计时间：45 分钟 ｜ 前置：完成前 16 章 ｜ 本章调用真实 DeepSeek 模型
+> 预计时间：90 分钟 ｜ 前置：完成第 01–16 章 ｜ 命令行任务调用真实 DeepSeek 模型
 
-前 16 章分别实现了可以独立运行的机制。本章从中挑出 Agent 主路径需要的核心模块，组装成一个 Python 包，并提供统一入口：接收任务文本、运行 Agent、保存会话、输出最终答案，再用退出码表示是否完成。插件、沙箱、Skills、Settings 等独立能力不会在本章自动接入。
+前 16 章把 Harness 拆成可以独立运行的小机制。本章回答最后一个问题：这些机制怎样按照 DeepSeek Harness“一切皆插件”的架构进入同一个真实 Agent，而不是只停留在互不相连的 demo 中。
 
-官方将这种形态称为 headless 组合包。bundle/headless 文档将它定义为一次性任务组合包，不挂载 Host、HTTP server、Web runtime 或浏览器插件。调用方通过一条命令提交任务，等待运行结束并读取结果。
+Capstone 仍然是 headless 运行时。它不启动网页、桌面界面或 HTTP 服务；普通模式从命令行接收一个任务，完成后把最后一条 assistant 文本写到 stdout。需要进程外控制时，`--rpc` 在 stdin/stdout 上提供逐行 JSON-RPC，同样不打开端口。
 
 ## 学习目标
 
 完成本章后，你将能够：
 
-- 把前面章节的自包含模块整理为可导入的 Python 包；
-- 实现接收单个任务的 headless runner；
-- 区分 stdout 结果、stderr 过程信息和进程退出码；
-- 说明一次任务如何经过 inbox、循环、工具、日志和持久化。
+- 用 Context、Service 与 Bundle 组装一个插件化 Agent；
+- 区分插件能力与模型工具，说明 Service Definition、Provider、Consumer 的职责；
+- 说明第 10–16 章分别接入了哪个运行时 seam；
+- 跟踪 checkpoint、retry、pruner 与 spill 在一次 step 中的准确位置；
+- 区分一次性任务出口与持续 JSON-RPC 入口；
+- 识别 Python 教学实现与官方 headless bundle 的边界。
 
-## 17.1 组装：从章节代码到一个包
+## 17.1 运行入口
 
-前 16 章采用自包含的教学目录，每个 demo 与模块位于同一目录，因此代码使用 `from client import ...` 这类扁平导入。整理为包后，模块需要改用 `from .client import ...` 这样的包内相对导入。核心逻辑不需要改变，说明各章的模块边界能够直接用于最终组装。
+安装依赖后，可以直接运行一次任务：
 
-组装清单：
+```bash
+uv run mini-harness "查看当前项目并总结入口"
+```
 
-| 包内模块 | 来自 | 贡献 |
-|----------|------|------|
-| `client.py` | 第 01/02 章 | 流式客户端 + 工具调用消息模型 |
-| `session.py` | 第 05 章 | 事件日志与消息投影 |
-| `registry.py` / `prompt.py` | 第 06 章 | 工具注册表 + 提示词组装 |
-| `agent.py` / `inbox.py` | 第 07 章 | 常驻循环与 inbox |
-| `persistence.py` | 第 08 章 | JSONL 持久化 |
-| `meter.py` | 第 09 章 | token 计量 |
-| `calculator.py` | 第 02 章 | 计算器工具 |
+也可以从本章源码目录运行：
 
-一个组装时才暴露的真实问题：第 01 章的 `load_api_key` 用 `parents[3]` 定位项目根，那只适用于固定的章节目录。包安装进 `site-packages` 后，继续从 `__file__` 向上找只会走到虚拟环境，不会走到用户项目。组装版改用 `find_dotenv(usecwd=True)`，从命令启动时的工作目录向上查找 `.env`；这才适用于安装后的命令行程序。
+```bash
+PYTHONPATH=chapters/17-headless-capstone/src \
+  uv run python -m mini_harness "查看当前项目并总结入口"
+```
 
-## 17.2 入口：headless runner
+程序把进度信息写到 stderr，把最终回答写到 stdout。最后一条 `turn/end` 的 reason 为 `completed` 时退出码是 0，否则是 1；缺少任务时先打印用法并以 2 退出，不会提前读取 API Key。
 
-包的入口 `__main__.py` 实现官方 headless runner 的核心语义：创建 Agent，把任务作为普通用户消息提交，等待完全停稳，持久化会话，把最后一条 assistant 文本写 stdout，再让最终轮次的原因决定退出码：
+JSON-RPC 使用另一条入口：
+
+```bash
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"settings.get","params":{"namespace":"agent"}}' \
+  | DEEPSEEK_API_KEY=... uv run mini-harness --rpc
+```
+
+`--rpc` 每读一行请求就写一行响应。当前公开 `settings.get`、`agent.run` 与 `plan.set` 三个方法；这是第 16 章 dispatcher 的 stdio transport，不是完整 Host/API Proxy。
+
+## 17.2 一切皆插件
+
+官方的 Cordis 内核不实现 Agent 业务能力，它只管理插件加载、服务依赖、事件和清理。模型、工具、Session、Prompt、Agent Loop、文件系统、Skill、调度和 UI 都由插件提供或扩展。这就是“一切皆插件”：内核保持很小，能力通过稳定接缝组合。
+
+它不等于“一切皆模型工具”。`skill`、`ask_user_question` 和 `job_output` 是插件注册给模型调用的工具；LLM provider、Session、retry、checkpoint、pruner 和 spill 也是插件，但不会出现在工具 schema 中。Capstone 最终有 32 个 fiber、25 个服务和 24 个模型工具，这三个数量表达的是不同层次。
+
+一个能力通常拆成三部分：Service Definition 规定消费者依赖什么；Provider 提供可替换实现；Consumer 把服务接到 Prompt、工具或事件边界。Python 教学版用稳定服务名加 class 或 Protocol 表达 Definition，例如 LLM 的 `ChatClient` Protocol。例如 `filesystem_provider` 提供文件系统服务，`filesystem_consumer` 注册 5 个工具和安全提示。卸载 consumer 后，这 5 个工具 schema 与提示词 effect 会一起消失；替换 provider 时，依赖它的 consumer 会先卸载，再用新服务重新启动。
+
+## 17.3 Context、Bundle 与 build_agent
+
+`build_agent()` 现在只做三件事：创建根 Context，挂载 Python Bundle，从服务表取得 Agent。
 
 ```python
-from pathlib import Path
-from uuid import uuid4
-
-SESSION_DIR = Path(".mini-harness") / "sessions"
-
-
-def _new_session_file() -> Path:
-    return SESSION_DIR / f"{uuid4().hex}.jsonl"
-
-
-def run_task(task: str, session_file: str | Path | None = None) -> tuple[str, bool]:
-    agent = build_agent()
-    meter = TokenMeter(context_window=100_000)
-
-    agent.followup(task)
-    session = agent.run()
-
-    pressure = meter.pressure(meter.measure(_messages_of(session)))
-    print(f"[meter] 上下文占用 {pressure.ratio:.1%}", file=sys.stderr)
-
-    store = JsonlStore(session_file or _new_session_file())
-    store.save(session)
-    print(f"[persist] 会话已保存到 {store.path}", file=sys.stderr)
-
-    final_text = ""
-    for message in session.derive_messages():
-        if message.role == "assistant" and message.content:
-            final_text = message.content
-    turn_ends = [event for event in session.events if event.type == "turn/end"]
-    completed = bool(turn_ends and turn_ends[-1].data.get("reason") == "completed")
-    return final_text, completed
+ctx = Context()
+ctx.plugin(
+    headless_bundle,
+    BundleConfig(
+        settings_document=load_settings_document(),
+        enable_console_questions=enable_console_questions,
+        checkpoint_flush=checkpoint_flush,
+    ),
+)
+return cast(Agent, ctx.require("agent"))
 ```
 
-四个设计点，全部来自前面的章节：
+`headless_bundle` 是显式的 Python 插件清单。它先挂载 Settings、Session、Prompt、Tools 和 LLM provider，再挂载文件、Shell、Skill、Goal、Plan、Web、Subagent、Jobs、Workflow 与四个策略插件，最后提供 Agent。等待 `agent` 服务的用户问答、委派和 RPC consumer 会在服务出现后自动启动。
 
-1. 任务就是一条普通用户消息。入口不做任何特殊处理，任务与对话里任何一句话地位相同，这让第 07 章的循环、第 05 章的日志都无需为 headless 开特例。
-2. stdout 只放最终答案。计量、持久化这类过程信息走 stderr。stdout 的契约是给调用脚本的结果，混入日志会让脚本无法解析。官方在成功运行时保持 stderr 为空，教学版放宽为过程信息走 stderr。
-3. 退出码等于完成与否：只检查最后一个 turn/end，原因是 completed 才返回 0。检查“曾经出现过一次 completed”会把后续失败误判成成功。
-4. 落盘在退出前。默认路径是 `.mini-harness/sessions/<随机 id>.jsonl`，每次一次性任务使用新文件，重复运行不会拿新 Session 去覆盖旧日志。`JsonlStore` 自身仍保持首次原子发布、同一 Session 后续只追加的约束。
+Agent 的构造器不再接收 retry、checkpoint、Plan Mode、meter、pruner、spill 或清理回调。循环只发布 `agent/pre-step`、`agent/prepare-request`、`llm/request`、`tools/execute` 与 `tools/post-execute` 等事件，策略插件监听对应边界。新增策略时不需要再修改 Agent Loop。
 
-## 17.3 组装后仍然成立的不变量
+工具注册表、Prompt 段和 RPC 方法的 `register` 都返回 disposer。插件通过 `ctx.effect(...)` 收集 disposer；`agent.close()` 只销毁根 Context，由它逆序卸载整棵插件树。这个收尾路径同时关闭 continuable Subagent 和 LocalJobs，并移除工具、Prompt、RPC 与服务注册。
 
-最终包不是把旧章节代码简单复制到一起。下面这些后来补齐的规则也必须保留：
+## 17.4 第 10–16 章接在哪里
 
-- 流式响应只有收到 `[DONE]` 才算完整；连接静默中断时抛错，不能把半条回答记为完整消息。
-- Inbox 在 turn 边界先领取整批 next-step，再领取一条 next-turn；step 边界一次领取整批 steer。模型刚完成时若又有 steer，就在当前 turn 继续下一个 step。
-- 每次模型调用都由 `step/start` 与 `step/end` 包住；`request/header` 只在 system、模型配置或工具 schema 变化时追加。
-- Session 事件与嵌套 data 都是不可变快照，并拒绝无法无损写入 JSON 的值。
-- 工具名稳定排序，prompt 同层重名立即失败，未知变量立即失败。
-- 崩溃恢复只截断末尾未换行片段；完整坏行会报错。返回的 Session 会依次补齐开放的 `tool/result`、`step/end` 和真实 turn 编号的 `turn/end`，再次 `save()` 时才写回这些合成事件。
+Capstone 一共注册 24 个模型工具，包含 calculator 和下面 23 个第 10–16 章工具。
 
-这些规则分别来自前面章节，但只有在 capstone 里一起成立，headless 输出才可信：一个缺失的 `[DONE]`、一个未闭合的 step 或一次覆盖式保存，都可能让调用方把不完整运行误判为成功。
+| 章节 | 工具或服务 | Capstone 接线 |
+|---|---|---|
+| 10 | `read`、`write`、`edit`、`grep`、`glob` | Filesystem provider + 工具/Prompt consumer |
+| 11 | `shell` | Shell provider + 工具 consumer；教学版策略不是内核沙箱 |
+| 12 | `skill` | SkillCatalog provider + 渐进加载工具/Prompt consumer |
+| 13 | `get_goal`、`create_goal`、`update_goal`、`todo_write` | GoalTodo provider；状态写入 Session 服务 |
+| 13 | `ask_user_question`、`exit_plan_mode` | Question/Plan provider + 等待 Agent 的交互 consumer |
+| 14 | `subagent`、`subagent_fork`、`send_message`、`interrupt_agent` | Subagent provider + 委派 consumer |
+| 14 | `job_output`、`job_list`、`job_kill` | owner 隔离的 LocalJobs provider |
+| 14 | `workflow` | 有并发与总量上限的 Workflow provider |
+| 15 | `web_search`、`web_fetch` | Web provider + 两个独立工具 |
+| 16 | Settings、RpcDispatcher | Settings provider + 等待 Agent/Plan 的 RPC consumer |
 
-## 17.4 运行完整示例
+全部 consumer active 时工具清单是固定的 24 项。Plan Mode 开关只改变 `plan:policy` Prompt 段，`exit_plan_mode` 在默认模式下也继续出现在 schema 中；若显式卸载某个工具 consumer，它贡献的 schema 会立即从下一次请求消失。
 
-```bash
-uv run python chapters/17-headless-capstone/src/demo.py
+## 17.5 一次 step 的插件顺序
+
+Agent 在每个 step 中只发布边界，插件按注册顺序完成下面的工作：
+
+1. Checkpoint 插件先在 `agent/pre-step` 持久化上一个已提交批次；
+2. Plan 插件再在同一事件中应用待生效的 `plan/mode` 选择；
+3. 追加 `step/start`，接纳本 step 的用户消息与 Plan Mode narration；
+4. 重新组装 system prompt，连同当前消息表层和工具 schema 交给 meter 计量；
+5. pruner 插件在 `agent/prepare-request` 计量压力；达到 80% 时才扫描超过字符阈值的工具结果，并在发生替换后重新派生消息表层；
+6. 记录发生变化的 request header；
+7. `llm/request` waterfall 的外层是 retry，内层是 checkpoint；每次模型尝试都会先成功持久化；
+8. 模型失败时 RetryPolicy 记录 `llm/retry`，通过 `checkpoint/retry` 持久化调度事件后才退避；等待结束记录 `llm/retry-started`，并在同一个 step 复用已接受的 assembly；
+9. 对每个 `tool/call`，checkpoint 插件在 `tools/execute` waterfall 中成功持久化后才放行工具正文；
+10. spill 插件在 `tools/post-execute` 检查最终纯文本结果，必要时保存原文并把预算内预览写入 `tool/result`，最后追加 `step/end`。
+
+checkpoint 失败采用 fail-closed：模型适配器或工具正文不会越过失败屏障。它保证的是“执行意图先持久化”，不是任意外部副作用的恰好一次。
+
+## 17.6 Plan Mode 与用户问答
+
+`plan.set` 在 turn 之间立即追加 `plan/mode`。如果 Agent 正在一个开放 turn 中，选择先留在 pending 状态，到下一次已接受的 step 边界才提交。
+
+JSON-RPC 的 `plan.set` 要求 `active` 是真正的 JSON boolean。字符串 `"false"` 不会按 Python truthiness 误转成 true，而是返回 `INVALID_PARAMS`。
+
+`exit_plan_mode` 要求计划以 `#` 一级标题开头，并通过 UserQuestionService 提交结构化评审。只有唯一答案项、唯一选择 `Approve`、且没有 custom 文本时才算批准。
+
+批准工具结果返回后，日志里的模式仍暂时是 active。同一 assistant 响应中剩余的工具调用继续受 Plan Mode 引导；下一 step 边界才写入 `plan/mode=false`。这与官方 rc.8 的批次语义一致。
+
+普通 Headless CLI 的 provider 在 stderr 展示标题、计划和选项，从 stdin 读取编号、标签或自定义反馈。`--rpc` 模式不注册这个 Console provider，因为 JSON-RPC line transport 与 `input()` 不能争用同一个 stdin；当前最小 RPC 子集也没有单独的交互问答通道。用户问答 seam 只允许一个 provider，并验证精确 live root；被另一个 Agent 所有的 child 不应阻塞等待人类回答。
+
+## 17.7 retry、checkpoint、pruner 与 spill
+
+RetryPolicy 默认只重试 `EMPTY_RESPONSE`、`RATE_LIMIT`、`SERVER`、`TIMEOUT` 与 `TRANSPORT`，最多五次，采用 500ms 到 10s 的有界指数退避和 10% 对称 jitter。
+
+有效且不超过上限的 `Retry-After` 会替代本地退避。每次计划等待前写 `llm/retry` 并执行 checkpoint，等待完成后写 `llm/retry-started`。空的 completed 响应也会归类为 `EMPTY_RESPONSE`。失败输出不进入 surface，同 step 的重试复用已接受的 Prompt assembly，不重复运行 pre-step 策略。
+
+ToolResultPruner 按 Unicode code point 计数。meter 先测量 system、当前消息表层与工具 schema；只有总压力达到上下文窗口的 80%，pruner 才处理超过字符阈值的候选结果。发生剪枝时，它先写 `compaction/prune` shadow price，再保留固定 head、marker 与 tail，通过 append-only replacement 改写模型表层，完整原事件仍在日志中。
+
+SpillPolicy 按 UTF-8 bytes 计数。过大的纯文本结果先交给 LocalSpillStore，模型只收到预算内的首尾预览、locator 和读取提示。Capstone 的 `read` 支持一基 `offset` 和最多 2000 行的 `limit`，因此可以按提示分页取回 spill 文件。保存失败、没有 backend、`read` 工具或嵌套结果都会保留原文，不能把一次成功工具调用改成失败。
+
+第 09 章的模型摘要压缩仍作为独立教学流程运行。Capstone 已接入 meter、pruner 与 spill，但还没有把摘要器和 provider context-overflow recovery 完整装入 Agent loop。
+
+## 17.8 fork、continuable、Jobs 与 Workflow
+
+`subagent` 的 lifecycle 可选 `one-shot` 或 `continuable`，调度可选 foreground 或 background。`subagent_fork` 与官方默认 bundle 一样固定为 one-shot，另行选择前后台，不把 continuable 的 report/prompt 前缀插到继承历史之前。
+
+isolated 子 Agent 从空 Session 开始，只看到自包含 prompt。fork 子 Agent 只复制父 Session 到最后一个完整 `turn/end` 的前缀，当前未闭合 turn 整段排除。
+
+continuable 子 Agent 保留自己的 Session，并用单 worker FIFO 接收消息。后台创建在首条 prompt 被队列接收后立即返回 `child_id` 与 accepted；`send_message` 即使在 child 运行中也能继续投递，并同样只返回投递确认，不等待回答或创建 `job_id`。`interrupt_agent` 设置当前 turn 的取消信号。兄弟 child 和其他 root 不能用 id 越权访问。
+
+后台 one-shot 执行进入 LocalJobs。每个 job 绑定 owner，支持 list/read/wait/kill；queued、running 和 stopping 共同占用 owner 容量。kill 先进入 stopping，生产方停稳后才成为 cancelled，终态仍由第一次结算决定。continuable child 不进入普通 Job；教学版也没有官方的 settlement notice、report 反向投递和冷恢复，因此父 Agent 要获得 child 的最终回答还需要扩展查询或通知接缝。
+
+教学版 WorkflowEngine 用 Python 线程运行 callable，并提供 parallel 与逐项 pipeline 的并发和总量上限。官方 rc.8 在 Worker Thread 中执行受限 JavaScript 脚本，提供 `agent`、`pipeline`、`parallel`、`phase` 和 `log` hooks。教学版保留编排语义，但线程不是隔离或安全边界，模型面的 `workflow` 参数也简化为 `tasks[]`。
+
+## 17.9 Settings
+
+默认配置位于 `agent` namespace，解析顺序仍是 schema defaults < composition base < user document。
+
+用户文档默认读取 `.mini-harness/settings.json`，例如：
+
+```json
+{
+  "agent": {
+    "sandbox_mode": "workspace-write",
+    "shell_mode": "read-only",
+    "approval_policy": "never",
+    "retry_max_retries": 3,
+    "spill_max_inline_bytes": 8192,
+    "jobs_max_concurrency": 4,
+    "workflow_max_agents": 16
+  }
+}
 ```
 
-真实输出，模型回答每次不同：
+Settings 更新使用 revision 做 Compare-and-Swap。本章启动时读取一次配置；没有实现官方 Host 的热更新、配置持久化 RPC 和多 profile 动态重组装。
 
-```
-[meter] 上下文占用 0.0%
-[persist] 会话已保存到 …/session.jsonl
-=== ① 组装清单：前 16 章各贡献了哪一块 ===
-  client.py                    来自 第 01/02 章    流式客户端 + 工具调用消息模型
-  session.py                   来自 第 05 章       事件日志与消息投影
-  registry.py / prompt.py      来自 第 06 章       工具注册表 + 提示词组装
-  agent.py / inbox.py          来自 第 07 章       常驻循环与 inbox
-  persistence.py               来自 第 08 章       JSONL 持久化
-  meter.py                     来自 第 09 章       token 计量
-  calculator.py                来自 第 02 章       计算器工具
+## 17.10 会话文件与退出
 
-=== ② 用组装的包跑真实任务 ===
-  [stdout] 1+2*3 = **7**
+普通任务先分配唯一的 `.mini-harness/sessions/<uuid>.jsonl`。runner 将同一个 JsonlStore 的 `save` 作为 Bundle 配置交给 checkpoint 插件，所以请求与工具意图会在运行中逐步落盘。无论任务成功还是抛错，runner 都会在关闭根 Context 前执行最终 flush，保证 `step/end` 与 `turn/end(error)` 不只停留在内存中。stdio RPC 退出时也执行相同收尾。
 
-根据运算优先级，先算乘法 2×3=6，再算加法 1+6=7。
-  [exit] 0（正常完成）
+默认 spill 文件位于 `.mini-harness/spills/<session>/`。suggested name 只作为安全文件名提示，backend 会生成碰撞安全名称并返回绝对 locator。
 
-=== ③ 会话落盘并读回 ===
-  读回 N 条事件（数量取决于模型是否调用工具）
-```
+程序从 Session 派生最后一条非空 assistant 文本。完成状态只读取最后一条 `turn/end`，不能因为更早的 turn 成功就把后续错误误报为完成。
 
-开头两行 [meter] 与 [persist] 是 stderr 上的过程信息，先于 stdout 出现是因为 stderr 不缓冲，这也正是两路输出分开的原因。demo 显式把会话写入临时目录中的 `session.jsonl`；直接使用命令行入口时，才会为每次任务创建 `.mini-harness/sessions/<随机 id>.jsonl`。项目已经在 `pyproject.toml` 声明命令行入口，可以直接在根目录运行：
+## 对照官方 rc.8
 
-```bash
-uv run mini-harness "1+2*3 等于几？"
-```
+本章的官方源码对照版本是 tag `dsh-v0.1.0-rc.8`、commit `141eb6fef83422698aef7a981029e843e8161534`。
 
-也可以进入本章 `src` 目录使用模块入口：
+理解这套组合方式时，可以同时对照官方文档的 [Cordis Primer](https://deepseek-harness.github.io/deepseek-harness/reference/cordis-primer)、[Capability Seams](https://deepseek-harness.github.io/deepseek-harness/reference/capability-seams) 与 [Extension Cookbook](https://deepseek-harness.github.io/deepseek-harness/reference/cookbook/extension-cookbook)。它们分别解释插件内核、Definition/Provider/Consumer 接缝和新增能力应接到扩展点而不是修改 Agent Loop 的原则。
 
-```bash
-cd chapters/17-headless-capstone/src
-uv run python -m mini_harness "1+2*3 等于几？"
-```
-
-## 17.5 全书回顾：完整运行流程
-
-下图按一次任务的执行顺序连接前面章节的核心机制：
-
-```mermaid
-flowchart TB
-    TASK[任务文本] --> INBOX[第07章 inbox]
-    INBOX --> LOOP[第07章 常驻循环]
-    LOOP --> STEP[step/start]
-    STEP --> ENV[第06章 envelope 组装<br>提示词 + 工具清单]
-    ENV --> CALL[第01/02章 模型调用]
-    CALL -->|tool_calls| TOOLS[第02章 工具执行]
-    TOOLS -->|结果回灌| STEP
-    CALL -->|final text| END[step/end / turn/end]
-    STEP --> LOG[第05章 仅追加事件日志]
-    END --> LOG
-    LOG --> METER[第09章 token 计量]
-    METER -.->|尚待接入| COMPACT[第09章 压缩扩展点]
-    COMPACT -.-> LOG
-    LOG --> PERSIST[第08章 持久化]
-    PERSIST --> OUT[stdout + 退出码]
-```
-
-虚线表示第 09 章已经实现、但本章 runner 尚未接入的压缩扩展点。主路径之外还有第 03/04 章的插件系统、第 10/11 章的沙箱与审批，以及第 12 到 16 章的独立能力；它们不会因为目录里存在代码就自动进入 capstone。
+| 官方源码 | 教学版对应 | 边界 |
+|---|---|---|
+| `packages/bundle/base/cordis.patch.yml`、`packages/bundle/headless/cordis.patch.yml` | `cordis.py`、`bundle.py`、`build_agent` | Python 显式 Bundle 清单，没有 YAML Loader/HMR/isolate |
+| `vendor/cordis/src/context.ts`、`fiber.ts`、`reflect.ts`、`events.ts` | `Context`、`PluginHandle`、`depends`、`waterfall` | 保留生命周期、依赖后到、服务替换与 effect 清理；同步教学版不实现异步 fiber |
+| `packages/plan/plan-mode`、`packages/interaction/user-questions` | `plan.py`、`user_questions.py` | 保留日志折叠、稳定工具、评审和边界提交 |
+| `packages/session/session-checkpoint-policy` | `checkpoint.py` 与 Agent 的请求、工具、pre-step、pre-retry flush 点 | 前三个边界对齐官方；教学版没有后台 batching controller，所以额外显式持久化 retry 调度事件 |
+| `packages/llm/llm-retry` | `retry.py` | 实现 normal 有限策略；未实现 always 和 AbortSignal |
+| `packages/compaction/compaction-tool-result-pruner` | `pruner.py` | 教学消息只有纯文本 block |
+| `packages/spill/*` | `spill.py` | local provider + policy；未实现 dispatch-log 分支 |
+| `packages/subagent/*`、`packages/jobs/jobs-local` | `subagent.py`、`jobs.py` | 进程内线程实现，无远程 provider 和冷恢复 |
+| `packages/workflow/workflow-worker-thread` | `workflow.py` | Python callable 教学引擎，不是 Worker Thread 安全边界 |
+| `packages/api/gateway` | `rpc.py`、`--rpc` | 最小 JSON-RPC 子集，无 Host/API Proxy |
 
 ## 本章小结
 
-- 包组装：扁平导入改相对导入，`load_api_key` 从当前工作目录查找 `.env`
-- `run_task`：headless runner 四设计点，任务即消息、stdout 契约、退出码语义、退出前落盘
-- 全书 17 章核心机制的完整关系图
-
-## 对照官方
-
-| 官方实现 | 我们对应实现 | 说明 |
-|----------|--------------|------|
-| [`packages/bundle/headless/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/bundle/headless/README.zh.md) | `mini_harness` 包 | 对齐一次性任务、不挂载 Host/HTTP、任务即用户消息、先持久化、stdout 输出和退出码语义 |
-| 官方 `dsh --profile headless "task"` | `uv run mini-harness "task"` | 官方的任务文本就是命令行参数，教学版同款 |
-
-官方 headless 组合包在 dsh-base 上叠加 headless-runner 插件，并由 cordis 完成装配；教学版只挑选前面章节中主路径所需的模块直接组合。官方会先 `flush` Session，再只汇总本次 runner 持有的事件区间；遇到最终 error 时把 code/message 写 stderr，成功时 stderr 为空。教学版新建空 Session，因此全量汇总与本次区间等价，但会额外把 meter 和持久化路径写到 stderr。两者实现形态不同，核心的一次性任务语义一致。
+- 第 10–16 章已经通过 provider、consumer 与策略插件进入同一个 Capstone；
+- Agent Loop 不直接持有 retry、checkpoint、Plan、pruner 或 spill，`build_agent()` 只挂载 Bundle；
+- Plan Mode 与用户问答通过独立 seam 协作，模式只在 step 边界切换；
+- checkpoint、retry、pruner 与 spill 位于不同边界，解决不同故障；
+- fork、continuable Subagent、Jobs 与 Workflow 分别负责 seed、生命周期、后台结算和批量编排；
+- headless CLI 支持一次性任务与 stdio JSON-RPC，但不冒充完整 Host 或平台沙箱。
 
 ## 练习
 
-1. **加一个工具。** 把第 15 章的 WebSearchClient 组装进包，给 DeepSeek Harness 最新版本是多少这类任务跑一遍，观察模型何时选择搜索工具。
-2. **压缩接通。** 把第 09 章的 compact 接进 run_task 的循环前，压力超阈值时压缩历史再请求，用小 context_window 验证长任务能跑完。
-3. **退出码契约。** 临时换入一个会在 `chat()` 抛出 `RuntimeError` 的假客户端，运行命令并观察非零退出码与 stderr；不要依赖模型“恰好请求未知工具”，因为未知工具会作为错误结果回灌，并不必然终止 Agent。
-4. **发布形态。** 项目已经声明 `[project.scripts]`。分别运行 `uv run mini-harness "任务"` 与 `cd chapters/17-headless-capstone/src && uv run python -m mini_harness "任务"`，比较命令入口与模块入口；再执行 `uv build` 检查 wheel 中只包含 `mini_harness` 包。
+1. 卸载 `filesystem_consumer`，验证五个文件工具 schema 和对应 Prompt 段一起消失，再重新安装插件。
+2. 卸载默认 LLM provider 并提供一个 FakeClient，观察 Agent consumer 如何自动重启，而 Agent Loop 无需修改。
+3. 把第 09 章摘要器做成 `agent/prepare-request` 插件，验证缩小失败不会破坏原历史。
+4. 为 `--rpc` 增加 `job.list` 与 `session.events` 方法，并保持错误响应的 request id。

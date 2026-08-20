@@ -80,9 +80,7 @@ class Settings:
 
 错误有标准错误码：-32700 解析失败、-32600 请求不合法、-32601 方法不存在、-32602 参数不合法。对端拿到数字就能程序化地分类处理，不用解析错误文本。
 
-`RpcError` 还带一个可选的 `request_id`。彻底无法解析、无法确认请求身份时
-响应 id 为 null；请求结构和 id 已经有效、只是 params 类型错误时，错误响应
-必须原样带回该 id，调用方才能把失败对应到正确请求。
+`RpcError` 还带一个可选的 `request_id`。彻底无法解析、无法确认请求身份时响应 id 为 null；请求结构和 id 已经有效、只是 params 类型错误时，错误响应必须原样带回该 id，调用方才能把失败对应到正确请求。
 
 ## 16.4 RpcDispatcher：解析、路由、结构化错误
 
@@ -169,6 +167,10 @@ uv run python chapters/16-settings-jsonrpc/src/demo.py
 ```
 
 六条请求各演示一条路径：正常读取 namespace、正常回声、未知方法、参数类型错误、缺协议版本、彻底不是 JSON。每一条都得到结构化响应，包括最后两条垃圾输入。
+
+## 16.6 进入 Capstone
+
+第 17 章在 composition root 注册 `agent` namespace，并从 `.mini-harness/settings.json` 读取用户层，统一结算 Sandbox、Shell、Skill、Jobs、Workflow、retry、pruner 与 spill 的参数。`--rpc` 在 stdin/stdout 上逐行分发 JSON-RPC，当前公开 `settings.get`、`agent.run` 和 `plan.set`；它不监听端口，也不冒充官方完整 Host/API Proxy。
 
 ## 本章小结
 

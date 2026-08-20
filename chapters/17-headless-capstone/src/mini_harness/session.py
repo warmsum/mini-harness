@@ -50,7 +50,7 @@ class FrozenDict(dict[str, Any]):
         self._immutable()
 
     @classmethod
-    def build(cls, items: dict[str, Any]) -> "FrozenDict":
+    def build(cls, items: dict[str, Any]) -> FrozenDict:
         frozen = cls()
         for key, value in items.items():
             dict.__setitem__(frozen, key, value)
@@ -143,7 +143,7 @@ class Session:
         其余事件（turn/start、tool/call、turn/end……）只记日志，不发给模型。
         """
         messages: list[Message] = []
-        for event in self._log:
+        for event in _surface_events(self._log):
             message = _derive_event_message(event)
             if message is not None:
                 messages.append(message)
@@ -154,7 +154,7 @@ class Session:
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_log(cls, events: Iterable[SessionEvent]) -> "Session":
+    def from_log(cls, events: Iterable[SessionEvent]) -> Session:
         """从既有日志重建会话（恢复/重放的入口）。
 
         校验 id 从 0 连续——日志是事实来源，缺一条都要响亮失败，
@@ -172,7 +172,7 @@ class Session:
                 raise ValueError(f"重放失败：第 {index} 个事件 ts 无效")
             frozen_data = _freeze_json(event.data)
             if not isinstance(frozen_data, FrozenDict):
-                raise ValueError(f"重放失败：第 {index} 个事件 data 必须是对象")
+                raise TypeError(f"重放失败：第 {index} 个事件 data 必须是对象")
             session._log.append(
                 SessionEvent(
                     id=event.id,
@@ -224,7 +224,7 @@ def _freeze_json(value: Any, _path: set[int] | None = None) -> Any:
             result: dict[str, Any] = {}
             for key, item in value.items():
                 if not isinstance(key, str):
-                    raise ValueError("事件 data 的对象键必须是字符串")
+                    raise TypeError("事件 data 的对象键必须是字符串")
                 result[key] = _freeze_json(item, path)
             return FrozenDict.build(result)
         finally:
@@ -244,7 +244,11 @@ def _derive_event_message(event: SessionEvent) -> Message | None:
         )
         reasoning_content = event.data.get("reasoning_content")
         # 文本、思考与工具调用都没有的事件不投影（它只是日志记录）
-        if event.data.get("content") is None and not reasoning_content and not tool_calls:
+        if (
+            event.data.get("content") is None
+            and not reasoning_content
+            and not tool_calls
+        ):
             return None
         return Message(
             role="assistant",
@@ -259,3 +263,24 @@ def _derive_event_message(event: SessionEvent) -> Message | None:
             tool_call_id=event.data["call_id"],
         )
     return None
+
+
+def _surface_events(events: list[SessionEvent]) -> list[SessionEvent]:
+    """应用 append-only replacement，模型只看当前表层节点。"""
+    nodes: list[SessionEvent] = []
+    for event in events:
+        if event.type not in {"user/message", "assistant/message", "tool/result"}:
+            continue
+        operation = event.data.get("surface_op")
+        if not isinstance(operation, dict) or operation.get("op") != "replace":
+            nodes.append(event)
+            continue
+        start = operation.get("start")
+        end = operation.get("end")
+        if not isinstance(start, int) or not isinstance(end, int) or start > end:
+            raise ValueError("surface replacement 范围无效")
+        indexes = [index for index, node in enumerate(nodes) if start <= node.id <= end]
+        if not indexes:
+            raise ValueError("surface replacement 引用了不存在的节点")
+        nodes[indexes[0] : indexes[-1] + 1] = [event]
+    return nodes

@@ -11,25 +11,31 @@
 
 from __future__ import annotations
 
-import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from mini_harness.__main__ import run_task  # noqa: E402
+from mini_harness.__main__ import run_task
 
 
 def main() -> None:
     print("=== ① 组装清单：前 16 章各贡献了哪一块 ===")
     modules = [
         ("client.py", "第 01/02 章", "流式客户端 + 工具调用消息模型"),
+        ("cordis.py / bundle.py", "第 03/04 章", "插件内核、服务依赖与 Bundle"),
+        ("calculator.py", "第 02 章", "计算器工具"),
         ("session.py", "第 05 章", "事件日志与消息投影"),
         ("registry.py / prompt.py", "第 06 章", "工具注册表 + 提示词组装"),
-        ("agent.py / inbox.py", "第 07 章", "常驻循环与 inbox"),
-        ("persistence.py", "第 08 章", "JSONL 持久化"),
-        ("meter.py", "第 09 章", "token 计量"),
-        ("calculator.py", "第 02 章", "计算器工具"),
+        ("agent.py / inbox.py", "第 07 章", "常驻循环、inbox 与扩展事件"),
+        ("persistence.py / checkpoint.py", "第 08 章", "JSONL 持久化 + 副作用屏障"),
+        ("meter.py / pruner.py / spill.py", "第 09 章", "token 计量、剪枝与结果落盘"),
+        ("sandbox.py / fs_tools.py", "第 10 章", "路径围栏与文件工具"),
+        ("shell.py", "第 11 章", "Shell 策略、审批与超时"),
+        ("skills.py", "第 12 章", "技能目录与渐进加载"),
+        ("goal.py / plan.py / todo.py", "第 13 章", "目标、计划、问答与 Todo"),
+        ("subagent.py / jobs.py / workflow.py", "第 14 章", "委派、后台任务与编排"),
+        ("web_tools.py", "第 15 章", "Web Search 与 Web Fetch"),
+        ("settings.py / rpc.py", "第 16 章", "分层配置与 JSON-RPC"),
+        ("policies.py", "第 07–09 章", "retry、checkpoint、pruner 与 spill 插件"),
     ]
     for file, chapter, what in modules:
         print(f"  {file:<28} 来自 {chapter:<12} {what}")

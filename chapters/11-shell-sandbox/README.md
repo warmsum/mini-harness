@@ -158,6 +158,10 @@ precious.txt
 
 四条路径各讲了一个道理：② 模式门按类别挡，只读模式不碰写命令；③ 审批按个案管，同一模式，用户点头与否结局相反；④ 票据的一次性，第一次持票放行，第二次票没了，模式门重新生效。
 
+## 11.5 进入 Capstone
+
+第 17 章把 `run_command` 包装成 `shell` 工具。`shell_mode`、`approval_policy` 和 `shell_timeout_seconds` 来自 `agent` Settings；命令先经过 ShellPolicy 决策，允许后才进入 subprocess。这个接线复用本章的 fail-closed 语义，但仍是普通 Python 进程中的策略层，不冒充官方平台内核沙箱。
+
 ## 本章小结
 
 - `run_command`：subprocess、cwd、timeout 与可选 shell 解析，超时转结构化结果

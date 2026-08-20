@@ -367,8 +367,7 @@ class DeepSeekClient:
 
 ## 运行完整示例
 
-本章代码共两个文件，全部自包含，使用 `httpx`、`httpx-sse` 与
-`python-dotenv`。在项目根目录运行：
+本章代码共两个文件，全部自包含，使用 `httpx`、`httpx-sse` 与 `python-dotenv`。在项目根目录运行：
 
 ```bash
 uv run python chapters/01-streaming-agent/src/demo.py

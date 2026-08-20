@@ -7,7 +7,7 @@
 1. 新消息在 Agent 忙碌时到达，该怎么排队、何时生效？
 2. 一次 Agent 运行里，哪些算一轮，哪些算一步？
 
-官方把答案放在 core/agent-loop：Agent 的 inbox 按下一轮和下一步两条队列分流消息，循环本身只做调用模型、运行工具、重复这一件事，其余全部由边界事件组织。本章复刻这套结构的教学版。
+官方把答案放在 core/agent-loop：Agent 的 inbox 按下一轮和下一步两条队列分流消息，循环本身只做调用模型、运行工具、重复这一件事，其余全部由边界事件组织。模型请求还可能遇到限流、超时或临时服务错误，因此本章也加入官方有限 retry 策略，把等待和重新请求放进可审计的 turn 边界。
 
 ## 学习目标
 
@@ -16,7 +16,8 @@
 - 准确区分 turn（轮次）与 step（步骤）；
 - 使用 inbox 的 next-turn 与 next-step 队列安排消息；
 - 让同一个 Agent 连续处理多轮输入并保留会话历史；
-- 说明 followup 与 steer 的生效时机为什么不同。
+- 说明 followup 与 steer 的生效时机为什么不同；
+- 对可恢复的模型错误执行有限退避，并记录 retry 事件。
 
 ## 7.1 轮次与步骤
 
@@ -128,7 +129,37 @@ class Agent:
 
 教学版仍是同步驱动器：有消息就跑到 inbox 暂时清空；官方会在空闲时挂起并由投递唤醒。官方还持久记录 inbox splice、取消、blocked、max-tokens 等完整终止原因，本章只保留完成、错误与 turn 数安全阀。
 
-## 7.4 运行完整示例
+## 7.4 LLM retry：在同一个 step 重试请求
+
+模型请求失败不等于任务必然失败。限流、服务端错误、超时和网络传输错误通常可以恢复；参数错误和认证错误则应立即暴露。官方将 retry 配置放在 provider 上，在 Agent 的 request-error 边界执行策略。
+
+```python
+while True:
+    try:
+        reply = self._client.chat(messages, tools)
+        if not reply.content and not reply.reasoning_content and not reply.tool_calls:
+            raise _EmptyResponseError("model returned a completed response with no content")
+    except Exception as error:
+        if self._retry_policy is None or not self._retry_policy.recover(
+            self._session,
+            turn=self._turn_no,
+            step=step,
+            error=error,
+        ):
+            raise
+        continue
+    break
+```
+
+教学版默认只重试 `EMPTY_RESPONSE`、`RATE_LIMIT`、`SERVER`、`TIMEOUT` 与 `TRANSPORT`，最多五次。等待时间从 500ms 开始指数增长，上限 10s，并加入 10% 对称 jitter，避免多个请求同时醒来再次撞到限流。有效且不超过本地上限的 `Retry-After` 会替代本地退避；服务端要求等待得更久时，本轮直接失败，不让一次请求无限占住 Agent。
+
+每次恢复先追加 `llm/retry`，里面保存稳定错误码、策略指纹、次数和等待时间；等待完成后再追加 `llm/retry-started`。失败请求不产生 assistant 消息，也不结束当前 turn/step。Agent 在同一个 request 循环里复用已经接受的 Prompt assembly，只重新调用 provider；同 step 的多次尝试共用一个 retry id。
+
+这样做有两个作用。第一，Plan Mode 的 pending 选择和其他 pre-step 策略不会因为临时网络错误重复执行。第二，turn/step 只表达一次逻辑请求，审计时仍能通过两类 retry 事件看出尝试次数和等待时间。RetryPolicy 从当前 Session 中同 turn、step、provider 和策略指纹的已有事件派生次数，因此恢复和重复调用不会依赖易丢失的内存计数器。
+
+教学版只实现官方 `normal` 有限模式，没有 `always` 模式、AbortSignal 和多插件 waterfall 组合；等待是同步的，会占用当前线程。
+
+## 7.5 运行完整示例
 
 ```bash
 uv run python chapters/07-agent-inbox/src/demo.py
@@ -185,6 +216,7 @@ uv run python chapters/07-agent-inbox/src/demo.py
 - `Inbox`：next-turn 与 next-step 两条队列，两个领取时机
 - `Agent`：常驻循环，领取、开轮、轮内 step 循环、关轮
 - `steer` 机制：step 级插队；领取后按普通 `user/message` 入日志，教学版不额外保留投递类型
+- `RetryPolicy`：稳定错误码、有限预算、有界指数退避、jitter、Retry-After 与两条事件
 - turn（轮次）与 step（步骤）术语体系，以及轮次边界在日志中的形态
 
 ## 对照官方
@@ -196,6 +228,7 @@ uv run python chapters/07-agent-inbox/src/demo.py
 | 同上 | `Agent` | 官方把 ReactLoopAgent 与 inbox 保持为包内实现，对外暴露 send 原语；教学版直接暴露类便于学习 |
 | 同上 | `_run_turn` | 核心循环只负责调用模型、运行工具和重复，其余行为由插件与事件组合 |
 | 同上 | 会话日志 | 已接纳消息、请求边界与工具调用写入日志，并用于后续 step 的请求重建 |
+| [`packages/llm/llm-retry/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/llm-retry/README.zh.md) | `RetryPolicy` | 对齐 normal 模式的错误码、有限预算、provider delay、有界退避与 retry 事件；教学版没有 always、取消和 waterfall 组合 |
 
 ## 练习
 
@@ -203,3 +236,4 @@ uv run python chapters/07-agent-inbox/src/demo.py
 2. **inject 补全。** 仿照官方第三种原语 inject，给 Inbox 加一个投递到 next-step 但不唤醒的入口，思考它适合什么场景。
 3. **轮次推演。** 纸笔推演 demo 两个轮次的完整事件序列，标注每个 step 的边界，与真实输出对比。
 4. **max_turns 行为。** 把 max_turns 设为 1，投递两个 followup，观察第二条消息去哪了，思考真实框架该如何处理没处理完的消息。
+5. **retry 推演。** 注入一个前两次抛 `RATE_LIMIT`、第三次成功的假客户端，并把 sleeper 改成记录参数的函数。断言日志只有一个 turn、一个 step 和一条最终 assistant 消息，两次 retry 事件的 turn/step 与 retry id 相同。

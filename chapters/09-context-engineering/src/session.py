@@ -143,7 +143,7 @@ class Session:
         其余事件（turn/start、tool/call、turn/end……）只记日志，不发给模型。
         """
         messages: list[Message] = []
-        for event in self._log:
+        for event in _surface_events(self._log):
             message = _derive_event_message(event)
             if message is not None:
                 messages.append(message)
@@ -259,3 +259,26 @@ def _derive_event_message(event: SessionEvent) -> Message | None:
             tool_call_id=event.data["call_id"],
         )
     return None
+
+
+def _surface_events(events: list[SessionEvent]) -> list[SessionEvent]:
+    """应用 append-only replacement，模型只看当前表层节点。"""
+    nodes: list[SessionEvent] = []
+    for event in events:
+        if event.type not in {"user/message", "assistant/message", "tool/result"}:
+            continue
+        operation = event.data.get("surface_op")
+        if not isinstance(operation, dict) or operation.get("op") != "replace":
+            nodes.append(event)
+            continue
+        start = operation.get("start")
+        end = operation.get("end")
+        if not isinstance(start, int) or not isinstance(end, int) or start > end:
+            raise ValueError("surface replacement 范围无效")
+        indexes = [
+            index for index, node in enumerate(nodes) if start <= node.id <= end
+        ]
+        if not indexes:
+            raise ValueError("surface replacement 引用了不存在的节点")
+        nodes[indexes[0] : indexes[-1] + 1] = [event]
+    return nodes

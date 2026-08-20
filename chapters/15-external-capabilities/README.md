@@ -161,6 +161,10 @@ uv run python chapters/15-external-capabilities/src/demo.py
 
 三个观察点：① 两条查询并发执行，来源按排名轮询合并并按 URL 去重；② 来源来自结构化结果块，title、URL、可选 snippet 与发布时间一起返回，提供方生成的自由文本没有进入结果；③ `web_fetch` 读取真实 HTML，再提取标题与正文片段。
 
+## 15.7 进入 Capstone
+
+第 17 章注册 `web_search` 和 `web_fetch` 两个独立工具。前者接收 `queries[]`，通过 DeepSeek Anthropic Messages 服务器工具发现结构化来源，会产生模型 API 用量；后者只对指定 URL 执行普通 HTTP GET，不调用模型。搜索结果不会自动触发抓取，是否继续读取某个来源由 Agent 下一 step 决定。
+
 ## 本章小结
 
 - `WebSearchClient._search_one`：Anthropic 兼容 `/messages` 端点、服务器工具声明、结构化块解析与严格模式

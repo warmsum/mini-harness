@@ -7,6 +7,7 @@ name/description/parameters，execute 是给程序跑的，绝不能外泄。
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from .client import Tool
@@ -18,12 +19,18 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
 
-    def register(self, tool: Tool) -> None:
+    def register(self, tool: Tool) -> Callable[[], None]:
         """注册一个工具。重名即抛错——两个同名工具会让模型传参时
         产生歧义，必须在入口处挡掉。"""
         if tool.name in self._tools:
             raise ValueError(f'工具 "{tool.name}" 已被注册')
         self._tools[tool.name] = tool
+
+        def unregister() -> None:
+            if self._tools.get(tool.name) is tool:
+                del self._tools[tool.name]
+
+        return unregister
 
     def unregister(self, name: str) -> None:
         del self._tools[name]

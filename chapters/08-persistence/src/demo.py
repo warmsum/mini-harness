@@ -3,10 +3,11 @@
 运行（无需 API，纯本地，确定性输出）：
     uv run python chapters/08-persistence/src/demo.py
 
-三节：
+四节：
 ① 手造一段会话 → save → 打印磁盘上的 JSONL 原文
 ② load → 重放一致性校验
-③ 模拟崩溃（往文件尾追加半行）→ load → 观察合成 turn/end
+③ checkpoint 在工具副作用前持久化 call
+④ 模拟崩溃（往文件尾追加半行）→ load → 观察合成 turn/end
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+from checkpoint import CheckpointPolicy
 from persistence import JsonlStore
 from session import Session
 
@@ -52,7 +54,24 @@ def main() -> None:
         print(f"  读回 {len(loaded.events)} 条事件，类型序列与原始一致: {same}")
 
         print()
-        print("=== ③ 模拟崩溃：最后一条 turn/end 还没写，进程就被杀 ===")
+        print("=== ③ checkpoint：工具意图先落盘，副作用后执行 ===")
+        checkpoint_path = Path(tmp) / "checkpoint.jsonl"
+        checkpoint_store = JsonlStore(checkpoint_path)
+        checkpoint = CheckpointPolicy(checkpoint_store.save)
+        pending = Session()
+        pending.append("turn/start", {"turn": 1})
+        pending.append("step/start", {"turn": 1, "step": 1})
+        pending.append(
+            "tool/call",
+            {"call_id": "call-side-effect", "name": "write", "arguments": "{}"},
+        )
+        checkpoint.before_tool(pending)
+        persisted = JsonlStore(checkpoint_path).load()
+        print(f"  副作用前磁盘末事件: {persisted.events[2].type}")
+        print("  ← flush 失败时，调用方不会进入工具正文")
+
+        print()
+        print("=== ④ 模拟崩溃：最后一条 turn/end 还没写，进程就被杀 ===")
         # 1) 把文件的最后一行（turn/end）删掉——模拟「轮次还没收尾就崩溃」
         lines = path.read_text(encoding="utf-8").splitlines()
         path.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")

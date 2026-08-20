@@ -196,6 +196,10 @@ todo.txt
 
 七部分输出覆盖了文件工具的一条完整路径。拒绝信息同时给出修正方向：文件未读取时先读；匹配不唯一时提供更具体的文本；文件已变化时重新读取；路径越界时改用允许的位置。
 
+## 10.6 进入 Capstone
+
+第 17 章注册 `read`、`write`、`edit`、`grep` 和 `glob` 五个模型工具。它们共享进程工作目录、SandboxPolicy 与 ObservationTracker；Prompt 同时告诉模型 workspace root、当前写模式和“现有文件必须先读后写”。因此本章不只是一组独立函数，路径围栏与观察状态会贯穿同一个 Agent Session。
+
 ## 本章小结
 
 - `SandboxPolicy.fence_write`：三模式、可写根集合、resolve 规范化、结构化拒绝

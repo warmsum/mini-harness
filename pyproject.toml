@@ -20,33 +20,3 @@ mini-harness = "mini_harness.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["chapters/17-headless-capstone/src/mini_harness"]
-
-[dependency-groups]
-dev = [
-  "mypy>=1.14,<2",
-  "ruff>=0.9,<1",
-]
-
-[tool.ruff]
-target-version = "py311"
-line-length = 100
-src = ["chapters", "scripts"]
-
-[tool.ruff.lint]
-# 教学仓库取向：保留真正的错误检查（pyflakes / 基本错误 / import 排序），
-# 放宽对长注释行与 demo 打印的约束——中文教学注释刻意写得长。
-select = ["F", "E4", "E7", "E9", "I"]
-extend-ignore = ["E501"]
-
-[tool.ruff.lint.per-file-ignores]
-"chapters/*/src/demo.py" = ["T201"]
-"scripts/*.py" = ["T201"]
-
-[tool.mypy]
-python_version = "3.11"
-strict = true
-warn_unreachable = true
-
-[[tool.mypy.overrides]]
-module = ["httpx_sse"]
-ignore_missing_imports = true

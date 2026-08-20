@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CHAPTERS = ROOT / "chapters"
 EXPECTED_CHAPTERS = 17
-# 只跑本地机制的章节（不调用模型/Web Search，CI 无密钥可用）
+# 只跑本地机制的章节，学习者无需 API Key 即可运行。
 LOCAL_ONLY_NUMBERS = frozenset({3, 4, 8, 10, 11, 12, 13, 16})
 
 

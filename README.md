@@ -30,7 +30,7 @@ mini-harness 将 DSH 的核心机制拆成 17 个 Python 章节。课程从最�
 - 流式响应如何从数据分片组装成一条完整消息；
 - 模型如何提出工具调用，程序如何执行工具并把结果送回模型；
 - 会话事件如何记录、投影、持久化、恢复和压缩；
-- 插件、服务与依赖如何启动，并在卸载时按顺序清理资源；
+- 模型、工具、Prompt、Session 与运行策略如何作为插件协作，并在卸载时按顺序清理资源；
 - 文件、Shell、技能、Goal、Todo 和子 agent 如何接入运行循环；
 - 一个 headless Agent 如何完成组装、执行、落盘和结果结算。
 
@@ -91,7 +91,7 @@ Agent 的能力会不断增加。插件系统负责组织这些能力的安装�
 
 | 章节 | 核心问题 | 运行方式 |
 |---|---|---|
-| [03｜迷你插件系统](chapters/03-python-cordis/README.md) | 插件如何等待依赖、进入运行状态，并在卸载时释放资源？ | 本地 |
+| [03｜迷你插件系统](chapters/03-python-cordis/README.md) | 插件如何安装、进入运行状态，并在卸载时释放资源？ | 本地 |
 | [04｜服务与依赖](chapters/04-services-scopes/README.md) | 服务如何注册、拒绝重名并在提供者变化后重新解析，严格访问为什么能够暴露依赖错误？ | 本地 |
 
 ### 第三部分：建立持续运行的 Agent
@@ -102,9 +102,9 @@ Agent 的能力会不断增加。插件系统负责组织这些能力的安装�
 |---|---|---|
 | [05｜会话日志](chapters/05-session-log/README.md) | append-only 事件如何还原对话消息，并保留每次运行的过程？ | DeepSeek API |
 | [06｜请求 envelope 组装](chapters/06-prompt-tools/README.md) | System Prompt、历史消息和工具 schema 如何组成一次模型请求？ | DeepSeek API |
-| [07｜常驻 Agent 与 inbox](chapters/07-agent-inbox/README.md) | followup 与 steer 如何分别进入下一个 turn 和当前 turn 的下一个 step？ | DeepSeek API |
-| [08｜会话持久化](chapters/08-persistence/README.md) | JSONL 日志如何安全写入，并在进程重启后恢复？ | 本地 |
-| [09｜上下文工程](chapters/09-context-engineering/README.md) | 程序如何估算 token 压力，并用摘要替换较早的历史？ | DeepSeek API |
+| [07｜常驻 Agent 与 inbox](chapters/07-agent-inbox/README.md) | followup、steer 与失败模型请求的有限重试怎样进入明确边界？ | DeepSeek API |
+| [08｜会话持久化](chapters/08-persistence/README.md) | JSONL 如何恢复崩溃会话，模型请求和工具副作用前又怎样建立 checkpoint？ | 本地 |
+| [09｜上下文工程](chapters/09-context-engineering/README.md) | 摘要、工具结果剪枝与 spill 如何分别控制上下文体积？ | DeepSeek API |
 
 ### 第四部分：扩展 Agent 的能力
 
@@ -115,40 +115,45 @@ Agent 的能力会不断增加。插件系统负责组织这些能力的安装�
 | [10｜文件系统](chapters/10-filesystem/README.md) | 路径围栏、读后写检查和观察记录如何降低文件误操作风险？ | 本地 |
 | [11｜命令执行与审批](chapters/11-shell-sandbox/README.md) | Shell 命令如何经过权限判断、审批、超时和结果回收？ | 本地 |
 | [12｜技能与按需加载](chapters/12-instructions-skills/README.md) | 技能目录如何只暴露摘要，并在使用时加载完整指令？ | 本地 |
-| [13｜Goal 与 Todo](chapters/13-goal-plan-todo/README.md) | 长任务如何保存目标 revision 和任务清单快照？ | 本地 |
-| [14｜Subagent 委派](chapters/14-subagents-workflow/README.md) | 子 agent 如何获得独立上下文，并把部分结果或最终结果返回父任务？ | DeepSeek API |
+| [13｜Goal、Plan Mode 与 Todo](chapters/13-goal-plan-todo/README.md) | 长任务状态、计划评审与结构化用户问答怎样协作？ | 本地 |
+| [14｜Subagent、Jobs 与 Workflow](chapters/14-subagents-workflow/README.md) | isolated/fork/continuable 子 agent 如何前台或后台执行并参与工作流？ | DeepSeek API |
 | [15｜网络搜索与网页抓取](chapters/15-external-capabilities/README.md) | Agent 如何使用 DeepSeek Web Search，并将搜索结果转成可引用的上下文？ | DeepSeek API + Web Search |
 
 ### 第五部分：组装完整运行入口
 
-最后两章从两个方向处理系统边界：第 16 章单独讲配置与 RPC，第 17 章组装命令行运行入口。它们是并列的教学主题；当前 capstone 没有把第 16 章的 Settings/RPC 接入命令行。
+最后两章从两个方向处理系统边界：第 16 章单独讲配置与 RPC，第 17 章用 mini-Cordis 把模型、Session、Prompt、工具、第 10–16 章能力和运行时策略组装成插件树。JSON-RPC 使用 `--rpc` 在标准输入输出上传输逐行请求，不启动监听端口。
 
 | 章节 | 核心问题 | 运行方式 |
 |---|---|---|
 | [16｜配置与 RPC](chapters/16-settings-jsonrpc/README.md) | 分层配置如何结算，JSON-RPC 如何校验并分发外部请求？ | 本地 |
-| [17｜headless 组装](chapters/17-headless-capstone/README.md) | 客户端、Agent、会话持久化和结果结算如何形成一个命令行程序？ | DeepSeek API |
+| [17｜headless 完整组装](chapters/17-headless-capstone/README.md) | “一切皆插件”怎样把第 10–16 章与运行时策略接入同一个 Agent？ | DeepSeek API |
 
 ## 一次任务如何完成
 
-第 01、02、05、06、07、08、09、17 章组成 Agent 的主要运行路径。下面展示各章之间的概念关系；实线是第 17 章已经接通的路径，压缩是第 09 章单独演示、留待继续集成的扩展点：
+第 17 章把前面各章接进同一条执行路径。摘要压缩仍由第 09 章独立演示；Capstone 会在每个请求前计量 system、消息表层和工具 schema，压力达到 80% 时才运行无需模型的工具结果剪枝，spill 则位于工具结果边界。provider overflow 恢复尚未接入。
 
 ```mermaid
 flowchart TB
+    BUNDLE[第 03/04 章 Context + Bundle<br>安装 provider / consumer / policy] --> INBOX
     TASK[用户任务] --> INBOX[第 07 章 inbox<br>接收 followup / steer]
     INBOX --> LOOP[第 07 章 Agent 循环<br>划分 turn / step]
-    LOOP --> ENV[第 06 章请求 envelope<br>组装提示词、历史与工具]
-    ENV --> CALL[第 01、02 章模型调用<br>接收流式文本或工具请求]
-    CALL -->|tool_calls| TOOLS[第 02 章执行工具]
-    TOOLS -->|工具结果| LOOP
     LOOP --> LOG[第 05 章会话日志<br>追加事件并投影消息]
-    LOG --> METER[第 09 章 token 计量]
-    METER -.->|可选扩展| COMPACT[第 09 章压缩<br>第 17 章尚未接入]
-    COMPACT -.-> LOG
-    LOG --> PERSIST[第 08 章持久化<br>写入 JSONL]
+    LOG --> METER[第 09 章 token 计量<br>system、表层与工具 schema]
+    METER -->|压力低于 80%| ENV[第 06 章请求 envelope<br>组装提示词、历史与工具]
+    METER -->|压力达到 80%| PRUNE[第 09 章工具结果剪枝]
+    PRUNE --> ENV
+    ENV --> CALL[第 01、02 章模型调用<br>接收完整回复或工具请求]
+    CALL -->|失败| RETRY[第 07 章 LLM retry<br>退避、事件、同 step 重试]
+    RETRY --> CALL
+    CALL -->|最终文本| PERSIST
+    CALL -->|tool_calls| TOOLS[第 10–16 章工具目录]
+    TOOLS --> SPILL[第 09 章 spill<br>完整结果落盘、预览回灌]
+    SPILL --> LOG
+    LOG --> PERSIST[第 08 章 checkpoint + JSONL<br>请求与副作用前 flush]
     PERSIST --> OUT[第 17 章结果结算<br>stdout 与退出码]
 ```
 
-第 03、04 章提供插件和依赖管理，第 10、11 章约束本地操作，第 12 到 16 章增加可选能力。这些机制可以围绕主要运行路径独立学习，也能在完整系统中按需接入。
+第 03、04 章不再只是独立知识点。第 17 章的 `build_agent()` 只挂载插件 Bundle；第 10–16 章既保留独立 demo，也以 provider、consumer 或策略插件注册到 Prompt、工具目录、Agent 生命周期、Settings 或 RPC 边界。插件不等于模型工具：24 个工具会进入 schema，retry、checkpoint、Session 和 LLM provider 等插件不会进入 schema。
 
 ## 每章的学习方式
 
@@ -180,7 +185,7 @@ flowchart TB
 
 ## 官方源码依据
 
-课程中的机制和术语均对照 DeepSeek Harness 官方源码。当前审计基线固定到 2026-08-19 的 [`141eb6fef83422698aef7a981029e843e8161534`](https://github.com/deepseek-ai/DeepSeek-Harness/tree/141eb6fef83422698aef7a981029e843e8161534)（`0.1.0-rc.8`），避免上游继续变化后让课程结论失去可复现性。每章末尾提供当前主题的官方路径、保留的核心语义，以及为了教学而主动省略的工程能力。
+课程中的机制和术语均对照 DeepSeek Harness 官方源码。课程对照版本固定到 2026-08-19 的 [`141eb6fef83422698aef7a981029e843e8161534`](https://github.com/deepseek-ai/DeepSeek-Harness/tree/141eb6fef83422698aef7a981029e843e8161534)（`0.1.0-rc.8`），避免上游继续变化后让课程结论失去可复现性。每章末尾提供当前主题的官方路径、保留的核心语义，以及为了教学而主动省略的工程能力。
 
 <details>
 <summary><strong>查看 17 章官方源码对照表</strong></summary>
@@ -203,7 +208,7 @@ flowchart TB
 | 14 | Subagent provider 与委派 | `packages/subagent/subagent`、`packages/subagent/tool-subagent` |
 | 15 | Web capability seam | `packages/web/tool-web`、`packages/web/web-search-deepseek`、`packages/web/web-fetch-http` |
 | 16 | Settings 与 Typert 网关 | `packages/settings/settings`、`packages/api/gateway` |
-| 17 | Headless runner | `packages/bundle/headless` |
+| 17 | Cordis Bundle 与 Headless runner | `packages/bundle/base`、`packages/bundle/headless` |
 
 </details>
 
@@ -233,8 +238,8 @@ mini-harness/
 
 完成 17 章后，可以沿着以下方向继续扩展：
 
-- 在第 09 章加入压缩前的工具结果剪枝；
-- 在第 14 章实现 fork 子 agent 与 workflow 脚本编排；
+- 为第 09 章的摘要压缩补上 Capstone 内的完整自动触发与 provider overflow 恢复；
+- 将第 14 章教学版 Python Workflow 替换为官方 Worker Thread JavaScript 引擎；
 - 接入 MCP 客户端，将外部服务动态注册为工具；
 - 实现 Code Mode，把多个工具接口折叠成一个代码执行入口；
 - 在第 02 章补充流式工具参数分片的增量组装；

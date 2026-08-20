@@ -293,6 +293,8 @@ uv run python chapters/04-services-scopes/src/demo.py
 
 ## 本章小结
 
+第 17 章会实际使用本章的 provider、consumer、依赖等待和 waterfall，而不是回到手工构造一个大型 Runtime。文件、Shell、Skill、用户问答、Subagent 等能力分别提供服务和注册工具；retry 与 checkpoint 依次包装 `llm/request`；卸载 provider 时依赖方自动退场。Capstone 没有实现同树 isolate、YAML Loader 和热重载，但 Service Definition、Provider、Consumer 这条能力接缝已经进入真实运行路径。
+
 - `provide` 与 `get`：重名拒绝、精确注销、服务表与提供者生命周期联动
 - `inject` 与 `_recheck`：依赖签名、pending 等待、热重载、依赖卸载级联
 - fiber-bound Context view：回调在安装结束后仍按自己的 inject 读取服务
