@@ -4,10 +4,10 @@
 
 文件工具只能完成预先定义的读写操作，开发任务还需要运行测试、构建和 Git 命令。Shell 命令的能力范围更大，一条命令既可能删除大量文件，也可能读取不应暴露的数据。因此，执行命令前需要经过两层决策：
 
-1. 模式门：什么模式下能执行什么样的命令，第 10 章沙箱模式的命令版；
-2. 审批：模式放行了还不够，真正执行前要过人这一关。官方把这叫 approval，策略分 ask 与 never，问一下与直接拒。
+1. 运行模式：不同模式允许执行哪些类型的命令；
+2. 人工审批：某条命令即使符合当前模式，也可能需要用户明确同意。
 
-本章实现命令执行器与审批决策链，并如实交代官方与教学版的一处关键差异：官方的 bash-sandbox 用内核级隔离，macOS seatbelt、Linux landlock，把命令的文件写效应挡在系统调用层；教学版不实现内核沙箱，只实现决策层。即使是官方沙箱，限制也只覆盖文件影响，并不是通用安全沙箱。
+本章实现命令执行器和审批流程。教学版只能在命令执行前决定允许或拒绝，不能在系统层限制命令运行后的实际影响。官方的 `bash-sandbox` 还会使用 macOS Seatbelt 或 Linux Landlock，在操作系统层限制文件访问；即便如此，它也不是能够隔离所有风险的通用安全环境。
 
 ## 学习目标
 
@@ -15,16 +15,16 @@
 
 - 使用 `subprocess` 捕获命令输出、退出码与超时状态；
 - 按模式、审批策略和一次性授权决定是否执行命令；
-- 解释 allowed-once 与 fail closed 的安全含义；
+- 解释“一次性授权”和“检查失败时默认拒绝”的安全含义；
 - 区分教学版的文本决策层与官方内核级隔离。
 
 ## 11.1 原理：执行、超时与审批的三个问题
 
-问题一，如何处理输出。命令的 stdout 与 stderr 既要避免直接占满终端，也要交给模型读取。`capture_output=True` 将两路输出收集到 CommandResult 中，调用方可以按字段处理。
+问题一，如何处理输出。命令的标准输出 `stdout` 和错误输出 `stderr` 既不能不受控制地占满终端，又需要交给模型读取。`capture_output=True` 会把两路输出收集到 `CommandResult` 中，调用方可以按字段处理。
 
-问题二，命令挂死了怎么办。sleep 9999、等输入的交互程序、死循环，Agent 的命令绝不能无限期占住进程。答案：timeout 参数，超时即强制终止，结果里带 timed_out 标记。官方同样有超时机制，tool-call-timeout-policy 在 exec.signal 上设置协作式截止时间，教学版用 subprocess 内置的硬超时。
+问题二，命令长时间不结束怎么办。`sleep 9999`、等待输入的交互程序或死循环都可能一直占用进程。`timeout` 参数为命令设置最长运行时间，超时后终止子进程，并在结果中把 `timed_out` 标记为真。
 
-问题三，谁有权决定放行。模式门挡类别，read-only 模式下写类命令根本没商量；审批管个案，模式放行了的命令，逐条问人。官方把审批做成独立服务 user-approval，结果四值：allowed-once 是唯一放行值，一次性授权，只适用于所请求的那一个动作；其余是 rejected、cancelled、unavailable，没有审批通道时 fail closed，默认拒绝。
+问题三，谁有权决定是否执行。运行模式先判断命令类别，例如 `read-only` 模式只允许只读命令；需要进一步确认时，再把具体命令交给用户审批。审批有四种结果：一次性允许 `allowed-once`、拒绝 `rejected`、取消 `cancelled` 和审批通道不可用 `unavailable`。只有一次性允许会放行当前命令，其余结果都拒绝执行。
 
 ## 11.2 run_command：捕获、超时、结构化结果
 
@@ -73,8 +73,8 @@ def run_command(
 几个关键参数的用意：
 
 - `use_shell=True` 按 shell 语法解析，管道、重定向、`&&` 都能用；`False` 时先用 `shlex.split` 拆成参数列表，完全绕过 shell 语法。
-- `cwd` 决定命令从哪个目录开始执行。教学版直接信任调用方传入的路径，没有验证它是否位于工作区；demo 主动传入临时工作区。真实 Agent 必须由更外层统一约束 cwd，不能把这个参数交给不可信输入。
-- `timeout` 是硬终止，不是通知一下，是直接杀掉进程。超时不抛异常让调用方崩溃，而是变成一条正常结果，exit_code 为 −1 加标记。对 Agent 来说，命令超时了是给模型看的事实，不是程序的崩溃。
+- `cwd` 决定命令从哪个目录开始执行。教学版直接信任调用方传入的路径，没有验证它是否位于工作区；示例主动传入临时工作区。真实智能体必须由更外层统一限制 `cwd`，不能让不可信输入随意指定执行目录。
+- `timeout` 到期后会直接终止子进程。命令超时不会继续向外抛出异常，而是转换成一条结构化结果：`exit_code` 为 −1，`timed_out` 为真。模型可以根据这个结果决定下一步，而整个智能体进程不会因此退出。
 
 为什么还要提供 `use_shell=False`？因为文本白名单只能识别第一条命令。假如把 `ls; rm file` 交给 shell，第一词看起来是只读的 `ls`，后半句却会删除文件。因此，本章对 read-only 白名单命令关闭 shell 解析；只有经过更宽模式和审批的命令才使用完整 shell 语法。
 
@@ -116,11 +116,11 @@ def run_command(
 
 逐条看三个决策。
 
-一次性授权优先。`grant_once(command)` 签发的授权可以绕过模式门与审批，但只对完全相同的一条命令生效，使用一次后立即失效。它对应官方 sandbox_permissions 的升级流程：模型在 read-only 模式请求执行写命令，用户批准后只放行当前动作，后续写命令仍需重新判断。官方词汇表同样使用 allowed-once，而不是 allow-always。
+一次性授权最先检查。`grant_once(command)` 只对完全相同的一条命令生效，使用后立即失效。例如，模型在只读模式下请求执行写命令，用户可以只批准当前动作；后续写命令仍需重新判断。这种结果在代码中记为 `allowed-once`。
 
 模式检查发生在审批之前。read-only 模式下，白名单只做精确命令名匹配：`grep` 可以，`grep-and-delete` 不可以。放行后还会以 `shell=False` 执行，分号、管道和重定向只会成为普通参数，不能偷偷追加第二条命令。这里的白名单仍然只是教学近似，真实内核沙箱按系统调用产生的实际影响拦截，不依赖命令文本。
 
-审批遵循 fail closed。never 策略直接拒绝；ask 策略调用审批回调，只有 allowed-once 放行，其余三种结果全部拒绝。审批通道不可用时，Agent 停止当前动作，而不是绕过检查继续执行。官方说明，无头或组合不完整的部署会返回 unavailable，并按拒绝处理。
+审批采用“失败时默认拒绝”的原则，也称为 fail closed。`never` 策略直接拒绝；`ask` 策略调用审批函数，只有 `allowed-once` 会放行。审批通道不可用时，智能体停止当前动作，不会绕过检查继续执行。
 
 ## 11.4 运行完整示例
 
@@ -156,18 +156,18 @@ precious.txt
   文件还在吗: True
 ```
 
-四条路径各讲了一个道理：② 模式门按类别挡，只读模式不碰写命令；③ 审批按个案管，同一模式，用户点头与否结局相反；④ 票据的一次性，第一次持票放行，第二次票没了，模式门重新生效。
+四条路径分别验证了运行模式、人工审批和一次性授权：只读模式拒绝写命令；同一运行模式下，审批结果会改变某条命令是否执行；一次性授权使用后，下一次调用会重新经过正常判断。
 
-## 11.5 进入 Capstone
+## 11.5 在第 17 章中的使用方式
 
-第 17 章把 `run_command` 包装成 `shell` 工具。`shell_mode`、`approval_policy` 和 `shell_timeout_seconds` 来自 `agent` Settings；命令先经过 ShellPolicy 决策，允许后才进入 subprocess。这个接线复用本章的 fail-closed 语义，但仍是普通 Python 进程中的策略层，不冒充官方平台内核沙箱。
+第 17 章会把 `run_command` 包装成 `shell` 工具。`shell_mode`、`approval_policy` 和 `shell_timeout_seconds` 来自 `agent` 配置；命令先经过 `ShellPolicy` 判断，允许后才交给子进程执行。这仍然只是普通 Python 进程中的决策层，不具备官方平台的内核级隔离。
 
 ## 本章小结
 
 - `run_command`：subprocess、cwd、timeout 与可选 shell 解析，超时转结构化结果
 - `ShellPolicy.decide`：票据、模式门、审批的三段决策链
 - read-only 白名单使用精确命令名和 `shell=False`，拒绝命令拼接绕过
-- 审批四结果语义：allowed-once 唯一放行、fail closed
+- 审批结果：只有一次性允许会执行命令，审批失败或不可用时默认拒绝
 - 实现边界：教学版不校验 cwd，也不包含内核隔离；官方 bash-sandbox 使用 seatbelt 与 landlock
 
 ## 对照官方
@@ -175,12 +175,12 @@ precious.txt
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
 | [`packages/shell/bash-sandbox/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/shell/bash-sandbox/README.zh.md) | `ShellPolicy` | 官方支持 danger-full-access，并明确沙箱只限制文件影响；教学版不实现内核隔离 |
-| [`packages/interaction/user-approval/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/interaction/user-approval/README.zh.md) | 审批链 | 官方定义四种审批结果、ask/never 策略和 fail closed；教学版保留同样的决策语义 |
-| [`packages/guard/timeout-policy/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/guard/timeout-policy/README.zh.md) | `timeout` | 官方通过 `exec.signal` 协作式通知超时，教学版使用 subprocess 硬超时 |
+| [`packages/interaction/user-approval/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/interaction/user-approval/README.zh.md) | 审批链 | 官方定义四种审批结果以及询问和从不询问两种策略；教学版同样在审批失败时默认拒绝 |
+| [`packages/guard/timeout-policy/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/guard/timeout-policy/README.zh.md) | `timeout` | 官方通过 `exec.signal` 通知运行中的命令停止，教学版由 Python 子进程接口在超时后直接终止 |
 
 ## 练习
 
-1. **超时实验。** 执行 sleep 3，timeout 设为 1，观察 timed_out 标记与 stderr 文案；把 timeout 提到 10 再试。
-2. **管道与退出码。** 执行 ls /不存在 | grep x，观察 exit_code 是管道的哪一段的，shell 默认返回最后一段的退出码；讨论 Agent 读到 exit=0 会怎样误判。
-3. **票据绑定。** 签发 grant_once("rm -f a.txt") 后执行 rm -f b.txt，观察票据不匹配；讨论官方为什么要按所请求的那一个动作精确绑定。
-4. **审批疲劳。** 设计一个场景，Agent 连续 5 次请求写命令，说明为什么 read-only 白名单要跳过审批；再讨论记住本次会话的批准与 allowed-once 的取舍。
+1. 文本规则能够决定“是否允许执行”，内核沙箱能够限制“执行后真正影响什么”。请比较二者能够防御的风险，并解释为什么审批通过也不能代替系统级隔离。
+2. 为一个日常编码智能体制定命令策略：哪些命令可以自动执行，哪些必须逐次审批，哪些应始终拒绝？请考虑读取、测试、网络访问、Git 写操作和删除文件等类别。
+3. 一次性授权降低了长期授权风险，却可能造成审批疲劳；会话级授权更方便，却可能被后续命令滥用。设计一种折中方案，并说明授权应绑定哪些信息。
+4. 为命令执行器增加“预览决策”能力，在不运行命令的情况下返回模式门、审批和票据检查结果。先预览安全、需审批和拒绝三类命令，再真实执行一个会超时的安全命令，说明预览与执行如何共享策略、执行器又负责哪些运行期结果。

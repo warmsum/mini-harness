@@ -4,27 +4,29 @@
 
 第 05 章的会话日志目前只保存在内存中，程序退出后历史就会丢失。要支持崩溃恢复、稍后继续或迁移会话，事件日志必须写入磁盘。本章实现一个文件存储，并说明第 05 章 `subscribe` 接口如何用于增量持久化。
 
-DeepSeek Harness 将这项能力实现为独立后端包 session-persistence-jsonl，采用 JSONL 格式：首行是文件头，之后每行保存一个 JSON 对象。JSONL 易于跨语言读取，也便于直接检查；尾部单行损坏时，前面的完整记录仍可恢复。仅在任务结束时保存仍然不够，模型请求和工具副作用可能已经发生，所以本章还加入语义 checkpoint，在不可逆动作之前先把执行意图落盘。官方默认还支持 zstd 压缩和分片打包，教学版只保留未压缩的 JSONL，以便观察核心流程。
+本章使用 JSONL 保存日志。JSONL 文件的第一行记录格式和版本，之后每行保存一个 JSON 对象。它既方便直接打开检查，也允许程序只在文件末尾追加新事件；即使最后一行没有写完，前面的完整记录通常仍可读取。
+
+只在任务结束时保存还不够。程序可能在调用模型或执行写文件等操作后突然退出，导致动作已经发生，日志却没有记录。为此，程序会在重要操作前先保存已有事件。这个保存节点称为 checkpoint，本章称为“检查点”。
 
 ## 学习目标
 
 完成本章后，你将能够：
 
 - 把 `SessionEvent` 按 JSONL 格式写入文件并重新加载；
-- 首次创建时原子发布，后续只追加尚未落盘的事件；
+- 首次创建时原子发布，后续只追加尚未写入磁盘的事件；
 - 校验文件头、格式版本和事件编号；
-- 识别残缺尾行，并在恢复出的 Session 中为未闭合工具、step 与 turn 补充崩溃收尾事件；
-- 在模型请求、顶层工具副作用、下一 step 和 retry 退避之前执行 fail-closed checkpoint。
+- 识别没有写完的最后一行，并为未闭合的工具调用、步骤与轮次补充异常结束事件；
+- 在模型请求、顶层工具执行、下一步骤和重试等待之前建立检查点，保存失败时停止后续操作。
 
 ## 8.1 三个必须回答的问题
 
 写一个把日志存进文件的存储，看似只是序列化加写文件，实际有三个问题必须正面回答：
 
-1. 第一次创建怎么避免半文件？先写临时文件、`fsync`，再用 `os.replace` 原子发布 header 和已有前缀。
-2. 后续事件怎么保存？目标文件已经公开后不能每次整份重写；`save()` 先确认磁盘日志是内存日志的严格前缀，再只追加新增事件并 `fsync`。
-3. 哪些损坏可以修？只有文件末尾“没有换行的最后一个片段”能证明是一次未完成 append，可以安全截断。任何完整行或中间行解析失败都必须拒绝，不能借“崩溃恢复”静默丢掉后续数据。
+1. 第一次创建时怎样避免留下只写了一半的文件？程序先写临时文件，用 `fsync` 请求操作系统把内容写入磁盘，再通过 `os.replace` 一次替换成正式文件。
+2. 后续事件怎样保存？正式文件已经存在后，不应每次重写全部内容。`save()` 先确认磁盘日志确实是当前内存日志的开头部分，再只追加新增事件并调用 `fsync`。
+3. 哪些损坏可以自动修复？只有文件末尾没有换行的残缺片段，能够明确判断为一次没有完成的写入，可以安全截断。完整行或文件中间的内容解析失败时必须停止加载，不能借“崩溃恢复”丢弃后续数据。
 
-## 8.2 落盘：首次原子发布，随后仅追加
+## 8.2 写入磁盘：首次原子发布，随后仅追加
 
 ```python
 class JsonlStore:
@@ -48,11 +50,11 @@ class JsonlStore:
 
 逐段看：
 
-- 首行 header 写 format 与 version。它的用途在加载侧：未来的格式演进靠 version 判断，读错文件靠 format 拦截。
-- 每行一条事件，事件四元组 id、type、ts、data 原样序列化。`ensure_ascii=False` 让中文原样保存，文件里的人类可读性更好。
-- 首次发布使用临时文件、`fsync` 和 `os.replace`；后续调用验证前缀后仅追加。这保留了官方“已公开历史永不重写”的核心语义。
+- 第一行文件头记录 `format` 和 `version`。加载时可以据此识别文件类型，并判断程序是否支持这个版本。
+- 每行保存一条事件的 `id`、`type`、`ts` 和 `data`。`ensure_ascii=False` 让中文保持原样，文件更容易人工检查。
+- 第一次保存使用临时文件、`fsync` 和 `os.replace`；后续保存验证已有内容后只追加新事件。已经公开的历史不会被整份重写。
 
-这里假设只有一个写进程。`exists()` 后再 `os.replace()` 不能阻止两个进程同时首次发布；教学版也没有文件锁。单进程下它能避免暴露半文件，但不能宣称具备跨进程的 no-clobber 保证。
+这里假设只有一个进程负责写入。`exists()` 后再 `os.replace()` 不能阻止两个进程同时创建同一个文件，教学版也没有使用文件锁。因此，它能避免单进程留下半个文件，但不能保证多个进程互不覆盖。
 
 ## 8.3 读回：校验与崩溃修复
 
@@ -71,15 +73,17 @@ class JsonlStore:
 
 加载侧的三层防御，对应 8.1 的三个问题：
 
-1. 文件不存在直接抛 `FileNotFoundError`，调用方不该拿到一个空会话假装一切正常。
-2. header 校验失败立即抛错。读到别人的文件、未来版本的文件，都该响亮失败而不是猜。
-3. `_read_records` 只把末尾未换行片段标为 torn tail；完整坏行一律报错。截断后，加载器总会扫描开放状态，并依次合成缺失的 `tool/result`、`step/end` 和真实 turn 编号的 `turn/end`，不会再写死 `turn=0`。已落盘的 `tool/call` 没有结果时，合成结果使用 `TOOL_OUTCOME_UNKNOWN`：只读或幂等操作可以重试，有副作用的操作必须先核对外部状态或询问用户，不能断言工具一定“已中断”。这一步不能只在出现 torn tail 时执行：进程也可能恰好在一条完整事件写完后、收尾事件写入前崩溃。
+1. 文件不存在时直接抛出 `FileNotFoundError`，避免把缺失的会话误认为空会话。
+2. 文件头校验失败时立即报错。读取了其他格式或未来版本的文件时，程序不能猜测其含义。
+3. `_read_records` 只把末尾没有换行的片段视为未完成写入；其他损坏一律报错。截断残缺片段后，加载器会检查哪些工具调用、步骤和轮次没有结束，并依次补充 `tool/result`、`step/end` 和对应轮次的 `turn/end`。
+
+已经写入 `tool/call` 却没有结果时，恢复器无法判断工具是否真正执行，因此补充的结果使用 `TOOL_OUTCOME_UNKNOWN`。只读或可安全重复的操作可以再次尝试；可能修改外部状态的操作则应先检查实际结果或询问用户。即使文件最后一行完整，也仍要执行这项检查，因为程序可能恰好在写完某条事件后、写入结束事件前退出。
 
 最后，`Session.from_log` 继续执行第 05 章建立的 id 连续性校验。
 
-## 8.4 语义 checkpoint：先持久化意图，再执行动作
+## 8.4 检查点：先保存记录，再执行重要操作
 
-`save()` 回答“怎样持久化”，CheckpointPolicy 回答“什么时候必须持久化”。官方 checkpoint policy 在模型请求、顶层工具和 pre-step 三个边界 flush。教学版没有常驻持久化协调器，因此还把 retry 调度事件落盘作为第四个显式边界：
+`save()` 解决“怎样保存”，`CheckpointPolicy` 解决“什么时候必须保存”。本章选择四个检查点：调用模型前、执行顶层工具前、开始下一步骤前，以及进入重试等待前。
 
 ```python
 @dataclass(frozen=True)
@@ -100,12 +104,12 @@ class CheckpointPolicy:
         self.flush(session)
 ```
 
-- `before_model`：完整请求前缀先落盘，随后才能调用 provider；
-- `before_tool`：`tool/call` 先落盘，随后才能进入顶层工具正文；嵌套分派复用外层 checkpoint，避免重复 flush；
-- `before_step`：上一条 assistant 响应和有序工具结果先落盘，下一 step 才能从它们派生请求。
-- `before_retry`：`llm/retry` 调度事件先落盘，随后才进入退避等待。
+- `before_model`：先保存组装模型请求所依据的事件，再调用模型服务；
+- `before_tool`：先保存 `tool/call`，再执行顶层工具；工具内部继续调用其他工具时复用外层检查点，避免重复保存；
+- `before_step`：先保存上一条模型回复和有序的工具结果，再开始下一步骤；
+- `before_retry`：先保存 `llm/retry` 事件，再进入等待。
 
-四个方法都不吞 `flush` 异常。保存失败时，调用方不能继续调用模型、执行工具或开始 retry 退避，这叫 fail-closed。checkpoint 保证“执行意图先于动作持久化”，方便崩溃后判断发生到了哪里；它不保证外部副作用恰好一次，因为进程仍可能在工具已经写入远端、结果尚未落盘时崩溃。
+四个方法都会把保存错误交给调用方。保存失败时，程序停止调用模型、执行工具或进入重试等待。这种“检查失败就停止”的策略称为 fail closed。检查点能保证操作意图先于动作写入磁盘，便于恢复时判断程序运行到了哪里；但它不能保证外部操作只发生一次，因为程序仍可能在远端写入已经成功、结果事件尚未保存时退出。
 
 ## 8.5 运行完整示例
 
@@ -143,30 +147,30 @@ uv run python chapters/08-persistence/src/demo.py
   ← 残缺尾行被截断，缺失的轮次收尾被合成 turn/end 补上
 ```
 
-第 ③ 节先追加一个 `tool/call`，通过 CheckpointPolicy 保存，再读回磁盘确认工具意图已经存在。第 ④ 节由 demo 主动制造损坏：先删除最后一行 turn/end，模拟轮次尚未写完；再追加半行，模拟进程在写事件时退出。加载器会截断磁盘上的残缺片段，并在返回的内存 Session 中合成收尾事件。即使磁盘末尾是完整行，只要工具、step 或 turn 仍开放，也会合成相同的崩溃收尾。合成事件不会在 `load()` 内自动写回；调用方随后对恢复出的 Session 执行 `save()`，它们才会追加到磁盘。
+第 ③ 节先追加一个 `tool/call`，通过 `CheckpointPolicy` 保存，再读回磁盘确认工具调用意图已经存在。第 ④ 节由示例主动制造损坏：先删除最后一行 `turn/end`，模拟轮次尚未写完；再追加半行，模拟进程在写事件时退出。加载器会截断残缺片段，并在返回的内存 `Session` 中补充结束事件。即使磁盘末尾是完整行，只要工具、步骤或轮次仍未结束，也会进行相同处理。这些补充事件不会在 `load()` 中自动写回，只有调用方随后执行 `save()` 时才会追加到磁盘。
 
 ## 本章小结
 
 - `JsonlStore.save()`：首次原子发布、前缀校验、后续仅追加
-- `JsonlStore.load()`：严格 header/事件校验，只截断 torn tail，并始终按开放状态合成工具/step/turn 收尾
-- `CheckpointPolicy`：模型、顶层工具、下一 step 和 retry 退避四个 flush 边界，失败时不越过屏障
-- 三层防御加 `from_log` 连续性校验的完整恢复链
+- `JsonlStore.load()`：严格校验文件头和事件，只截断末尾未写完的片段，并为未结束的工具、步骤和轮次补充收尾
+- `CheckpointPolicy`：在模型请求、顶层工具、下一步骤和重试等待前保存，保存失败就停止后续操作
+- 恢复过程：检查文件、修复可以确认的残缺内容，再由 `from_log` 校验事件连续性
 
 ## 对照官方
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/session/session-persistence-jsonl/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/session/session-persistence-jsonl/README.zh.md) | `JsonlStore` | 对齐仅追加 JSONL 与恢复前校验；教学版首次写使用 `os.replace`，不具备官方跨进程 no-clobber 发布的完整保证 |
-| 同上 | `save` | 两者都首次原子发布、随后仅追加；官方额外实现批量 append、写失败回滚与跨平台发布细节 |
+| [`packages/session/session-persistence-jsonl/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/session/session-persistence-jsonl/README.zh.md) | `JsonlStore` | 与官方一样只向 JSONL 末尾追加，并在恢复前校验；教学版首次写入使用 `os.replace`，不能完整防止多个进程同时创建同一文件 |
+| 同上 | `save` | 两者都在首次写入时原子发布文件，之后只追加；官方还支持批量追加、写入失败回滚和更多跨平台细节 |
 | 同上 | （未实现） | 官方还会打包连续流式分片并支持 zstd 压缩；这些是存储优化，教学版不实现 |
-| 同上 | 崩溃修复 | 教学版只截断真正不完整的尾部，再按开放状态合成工具、step 与 turn closer；中间损坏响亮失败 |
-| [`packages/session/session-checkpoint-policy/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/session/session-checkpoint-policy/README.zh.md) | `CheckpointPolicy` | 模型请求、顶层工具与 pre-step 对齐官方；教学版没有常驻 batching controller，所以额外显式 flush `llm/retry` 后的退避边界 |
+| 同上 | 崩溃修复 | 教学版只截断真正不完整的尾部，再为尚未结束的工具调用、步骤和轮次补充收尾事件；中间内容损坏时拒绝加载 |
+| [`packages/session/session-checkpoint-policy/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/session/session-checkpoint-policy/README.zh.md) | `CheckpointPolicy` | 模型请求、顶层工具和步骤开始前的保存时机与官方一致；教学版没有后台批量保存控制器，因此会在等待重试前显式保存 `llm/retry` |
 
-官方还用协调器订阅 session/event、按窗口批量 flush，并以 zstd checksum frame 作为默认物理格式；教学版由调用方显式 `save()`，每次把尚未保存的尾部追加进去。
+官方还会订阅 `session/event`，按时间窗口批量写入，并默认使用带校验信息的 zstd 压缩格式。教学版由调用方显式执行 `save()`，每次追加尚未保存的事件。
 
 ## 练习
 
-1. **版本演进。** 把 header 的 version 改成 2 再 load，观察报错；然后给 load 加一个 v1 到 v2 迁移分支，体验格式演进的真实做法。
-2. **增量 flush。** 给 JsonlStore 加 `attach(session)` 方法，内部用 `session.subscribe` 监听新事件，攒够 5 条批量追加写盘。实现后思考批量写与原子发布如何兼容。
-3. **坏行实验。** 在文件中间而非末尾插入一行垃圾，观察 load 的行为；解释为什么只截断尾行的修复策略对中间坏行无效，以及官方如何应对，官方默认产物的 header 与每个 append 批次都带 checksum frame。
-4. **目录布局。** 真实框架的会话文件不会全部堆在一个目录，官方按项目目录与会话 id 分两级目录。设计一个同样的布局，实现 `JsonlStore.locate(session_id)`。
+1. JSONL、关系型数据库和每次整份覆盖的 JSON 文件都能保存会话。请从追加写、人工检查、并发、查询和损坏恢复几个方面比较它们，并说明教学版选择 JSONL 的理由。
+2. 分别面对残缺尾行、中间坏行、未闭合工具调用和只有 `turn/start` 的日志，恢复器应该继续、补写收尾还是拒绝加载？为每种情况说明可以信任的证据。
+3. 检查点保证“执行意图先写入磁盘”，但不能自动保证外部操作只执行一次。以发送邮件或写入远程数据库为例，说明崩溃恢复时仍可能发生什么，并提出一种补充机制。
+4. 编写一个只读会话检查器，输入 JSONL 文件后报告版本、事件数量、最后完整 turn、开放状态和可恢复问题。它不得悄悄修改源文件；若提供修复功能，应先明确展示将追加或截断的内容。

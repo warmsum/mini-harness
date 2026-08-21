@@ -6,7 +6,7 @@
 
 本章从算术问题开始。语言模型生成的是最可能出现的文本，并不等同于执行精确计算；可靠的算术应交给计算器完成。Function Calling（函数调用）也称 Tool Calling（工具调用），它允许模型描述“要调用哪个工具、传入什么参数”，再由程序执行真正的函数。
 
-本章实现一次完整的模型到工具再到模型的往返：模型不直接回答，而是发出一份调用 calculator、参数为 1+2*3 的请求；我们的代码执行真正的计算，把结果 7 送回模型；模型基于 7 给出最终答案。这个往返是 Agent 循环的最小形态，后面所有章节都在扩展它。
+本章实现一次完整的“模型—工具—模型”往返：模型不直接回答，而是请求调用 `calculator`，参数为 `1+2*3`；Python 程序完成计算，把结果 7 送回模型；模型再根据这个结果给出最终答案。这个过程是智能体运行循环的最小形态，后面所有章节都在扩展它。
 
 ## 学习目标
 
@@ -15,7 +15,7 @@
 - 读懂 OpenAI 兼容协议中的 `tool_calls`、`arguments` 与 `tool_call_id`；
 - 用 JSON Schema 描述一个工具的名称、用途和参数；
 - 安全执行模型生成的参数，并把成功或失败结果回传给模型；
-- 写出带轮次上限的最小 Agent 工具调用循环。
+- 写出带步骤上限的最小智能体工具调用循环。
 
 ## 2.1 模型为什么会调用工具
 
@@ -66,11 +66,11 @@ OpenAI 兼容协议里，模型回复一条消息时可以走两条通道之一�
 ```
 第一阶段：把问题与工具说明书发给模型
 第二阶段：模型不回答，返回 tool_calls 请求
-第三阶段：执行工具，把结果作为新消息回灌，再问模型
+第三阶段：执行工具，把结果作为新消息送回模型，再次请求回答
 第四阶段：模型基于结果走文字通道，给出最终答案
 ```
 
-按照第 07 章会正式定义的术语，这四个阶段构成两个 step：第一次模型调用和随后的工具执行属于 step 1，回灌结果后的第二次模型调用属于 step 2。
+按照第 07 章会正式定义的术语，这四个阶段构成两个步骤：第一次模型调用和随后的工具执行属于步骤 1，送回结果后的第二次模型调用属于步骤 2。
 
 画成时序图：
 
@@ -84,7 +84,7 @@ sequenceDiagram
     M->>A: content=null，tool_calls=[calculator("1+2*3")]
     A->>T: json.loads 参数后执行
     T->>A: 返回 "7.0"
-    A->>M: 回灌 role="tool" 消息（带 tool_call_id）
+    A->>M: 送回 role="tool" 消息（带 tool_call_id）
     M->>A: content="1+2*3 = 7"
 ```
 
@@ -245,7 +245,7 @@ class Message:
 
 - `reasoning_content` 保存模型返回的思考内容。它不直接显示给用户，但属于 assistant 历史；后续请求必须按原文回传。rc.8 将这条规则统一到所有带思考的 assistant 轮次，不再只回传同时带工具调用的轮次。
 - `tool_calls` 挂在 `assistant` 消息上，表示这条回复里模型请求调用这些工具。用 `tuple` 而不是 `list`，配合 `frozen=True` 的不可变性承诺，tuple 自身不可变。
-- `tool_call_id` 挂在 `role="tool"` 的消息上，与 `ToolCall.id` 一一对应。协议规定工具结果回灌时必须标明它是回答哪次调用的，模型一轮可能同时请求多个工具，没有 id 就对不上号。
+- `tool_call_id` 放在 `role="tool"` 的消息中，与 `ToolCall.id` 一一对应。把工具结果送回模型时必须标明它对应哪次调用；模型一轮可能同时请求多个工具，没有编号就无法正确配对。
 
 于是对话历史里出现了第四种角色 `tool`：
 
@@ -254,9 +254,9 @@ class Message:
 | `system` | 系统 | 历史最前面，设定行为规则 |
 | `user` | 人 | 提问 |
 | `assistant` | 模型 | 回答，或携带 tool_calls 请求工具 |
-| `tool` | 工具 | 工具的执行结果，回灌给模型 |
+| `tool` | 工具 | 工具的执行结果，送回模型 |
 
-`tool` 消息不进入人类视角的对话，它是给模型看的工作记录。官方 Harness 内部同样把工具结果作为消息回灌，官方文档写明已接纳的 user 消息、assistant 消息、工具调用与结果都会记录，并在后续 step 中发送。
+`tool` 消息不进入人类视角的对话，它是给模型看的工作记录。官方 Harness 同样把工具结果作为消息送回模型：已经接收的用户消息、模型消息、工具调用与结果都会记录，并在后续步骤中发送。
 
 ## 2.4 客户端升级
 
@@ -349,7 +349,7 @@ class DeepSeekClient:
 
 assistant 没有可见文本时仍发送空字符串 `content`，而不是 `null` 或直接省略；部分兼容网关会拒绝缺少文本且没有工具调用的思考历史。非空 `reasoning_content` 会按原文回传，`tool_calls` 和 `tool_call_id` 则各自在需要时出现。
 
-## 2.5 Agent 循环：把四个阶段串起来
+## 2.5 智能体循环：把四个阶段串起来
 
 模型已经能够请求工具，程序也已经能够执行工具，下一步是把请求、执行和回传串成循环：
 
@@ -393,11 +393,11 @@ def run_agent(
 
 循环里有三个关键决策：
 
-**决策一：终止条件。** 循环什么时候停？只有一种自然终点，模型不再请求工具，也就是 `reply.tool_calls` 为空。`max_steps` 是安全阀：模型可能陷入反复请求同一个工具的死循环，比如参数一直填错，没有上限程序就会永远转下去。官方 Harness 对失控轮次的治理更精细，第 07 章展开。
+**决策一：终止条件。** 循环什么时候停？自然的结束条件是模型不再请求工具，也就是 `reply.tool_calls` 为空。`max_steps` 用来限制最多执行多少步：模型可能因为参数一直填错而反复请求同一个工具，如果没有上限，程序就可能一直运行。第 07 章会继续处理更完整的结束情况。
 
-**决策二：错误回灌而不是中断。** 工具执行失败时，比如参数解析失败、除数为零，程序不崩溃，而是把错误文本作为工具结果回灌。模型读到工具执行出错：除数为零，下一轮会自己换参数重试。这模拟了人类遇到错误时的行为，Agent 的健壮性来自让模型看见错误。
+**决策二：把错误交还给模型。** 工具执行失败时，例如参数无法解析或出现除数为零，程序不直接结束，而是把错误作为工具结果送回模型。模型看到“工具执行出错：除数为零”后，可以在下一步修改参数或换一种回答方式。让模型知道工具为什么失败，比只让程序抛出异常更有利于继续完成任务。
 
-**决策三：一轮可多工具。** `reply.tool_calls` 是列表而非单个值，模型一轮可以同时请求多个工具，逐个执行、逐个回灌。教学版串行执行，官方支持按并发安全性并行调度，第 05 章展开。
+**决策三：一次回复可以请求多个工具。** `reply.tool_calls` 是列表而不是单个值，因此模型可以在一次回复中请求多个工具。教学版按顺序执行并逐个返回结果；官方实现还会根据工具是否适合并发来安排执行。
 
 ## 2.6 运行完整示例
 
@@ -428,11 +428,11 @@ uv run python chapters/02-tool-calling/src/demo.py
 答案是 **7**。
 ```
 
-对照 2.1 的四个阶段：模型请求了工具，我们执行并回灌，模型基于 7.0 给出最终答案。模型最后的回答里主动展示了运算过程，它读懂了工具结果，并把它组织成人话。
+对照 2.1 的四个阶段：模型请求工具，程序执行后把结果送回，模型再根据 7.0 给出最终答案。最后的回答主动展示了运算过程，说明模型已经读取工具结果，并把它组织成了自然语言。
 
 ### 错误路径：模型怎样面对失败
 
-把 demo 里的 `user_prompt` 改成帮我算 1/0，再跑一次。这是决策二的实战检验，工具执行抛错，错误被回灌，接下来发生什么：
+把示例里的 `user_prompt` 改成“帮我算 1/0”，再运行一次。工具执行会报错，错误结果也会作为工具消息送回模型。接下来可能出现两种结果：
 
 ```
 [assistant → 请求工具] ['calculator({"expression": "1/0"})']
@@ -453,22 +453,22 @@ uv run python chapters/02-tool-calling/src/demo.py
 ## 本章小结
 
 - `Tool` 与 `calculator`：工具等于给模型看的说明书加给程序跑的执行器；计算器用递归下降解析器实现，拒绝 `eval`
-- `ToolCall` 与扩展后的 `Message`：思考内容回传、工具请求、`tool` 角色回灌、`tool_call_id` 对应关系
+- `ToolCall` 与扩展后的 `Message`：思考内容回传、工具请求、`tool` 角色消息与 `tool_call_id` 对应关系
 - `DeepSeekClient.chat()` 升级：注入 `tools` 清单、解析 `tool_calls`、返回完整 `Message`
-- `run_agent()`：两 step 的最小往返，终止条件、错误回灌、多工具执行三个关键决策
+- `run_agent()`：两个步骤组成的最小往返，以及终止条件、错误返回和多工具执行
 
 ## 对照官方
 
 | 官方代码 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/core/agent-loop/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/core/agent-loop/README.zh.md) | `run_agent()` | 官方循环同样记录工具调用与结果并回灌；它是流式、多 step 的完整版，第 07 章继续对齐 |
-| [`packages/core/tools/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/core/tools/README.zh.md) | `Tool` | 官方 `ToolDefinition` 注册进 `ctx.tools`，执行经过 pre-execute、execute、post-execute 管线 |
-| [`packages/llm/llm/src/assembler.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/llm/src/assembler.ts) | `chat()` 的解析 | 官方组装器在流式模式下逐分片拼装 tool-call 块；本章用非流式 `chat()` 拿完整 tool_calls，流式工具分片见练习 4 |
-| [`packages/llm/llm-deepseek/src/serialize.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/llm-deepseek/src/serialize.ts) | `_wire_message()` | 对齐 assistant 空文本与每个带思考轮次的 `reasoning_content` 回传；教学版消息仍是纯文本，不实现官方图片附件序列化 |
+| [`packages/core/agent-loop/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/core/agent-loop/README.zh.md) | `run_agent()` | 官方循环同样记录工具调用，并把结果送回模型；它还支持流式处理和多个步骤，第 07 章继续讲解 |
+| [`packages/core/tools/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/core/tools/README.zh.md) | `Tool` | 官方将 `ToolDefinition` 注册到 `ctx.tools`，并在执行前、执行时和执行后分别提供扩展位置 |
+| [`packages/llm/llm/src/assembler.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/llm/src/assembler.ts) | `chat()` 的解析 | 官方组装器会逐个流式分片拼出工具调用；本章使用非流式 `chat()` 一次取得完整的 `tool_calls` |
+| [`packages/llm/llm-deepseek/src/serialize.ts`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/llm-deepseek/src/serialize.ts) | `_wire_message()` | 与官方一样回传模型的空文本和 `reasoning_content`；教学版消息只包含文本，不处理图片附件 |
 
 ## 练习
 
-1. **让模型面对一次失败。** 把 `user_prompt` 改成帮我算 1/0，观察模型与循环如何协作处理除数为零。模型收到错误后做了什么？它放弃了吗？它重复调用同一个工具了吗？把观察到的行为记录下来。
-2. **加一个工具。** 仿照 `calculator` 定义一个 `datetime` 工具，返回当前时间，无参数。把现在几点这个问题交给 Agent，观察模型何时选择调用它而不是直接回答。如果模型直接回答了，想想说明书的哪部分没写清楚。
-3. **验证说明书的力量。** 把 `calculator.description` 里的示例句删掉，反复问几个算式，对比模型传参格式的准确率变化。示例句为什么能提高准确率？给出你的解释。
-4. **流式工具分片。** 官方在流式模式下，`tool_calls` 是逐分片到达的，`delta.tool_calls` 里名字和参数分开推送。扩展第 01 章的 `stream()`，把 `delta.tool_calls` 拼装成完整的 `ToolCall` 列表，再与官方 `assembler.ts` 的实现对照，找出官方的处理和你自己的差异。
+1. 模型负责决定“是否调用工具”，程序负责决定“是否执行这次调用”。为什么不能把这两个职责都交给模型？请结合参数校验、权限和执行结果三个方面说明边界。
+2. 为一个订单查询、单位换算或天气查询工具设计完整说明书，包括名称、用途、参数 schema 和失败结果。说明哪些描述用于帮助模型选择工具，哪些校验必须由程序执行。
+3. 当工具说明含糊、多个工具能力重叠或工具返回错误时，智能体可能直接回答、反复调用或换一种方案。请选择一个场景，设计能够帮助智能体修正下一步行为的工具结果，同时避免把内部异常直接暴露给用户。
+4. 为本章智能体增加一个新的实用工具，并完成一次“模型请求工具—程序执行—结果返回—模型回答”的完整往返。至少验证一次成功调用和一次非法参数，说明 `tool_call_id` 如何保证请求与结果正确配对。

@@ -1,35 +1,35 @@
-# 14｜Subagent、Jobs 与 Workflow
+# 14｜子智能体、后台任务与工作流
 
 > 预计时间：60 分钟 ｜ 前置：完成第 07 章 ｜ 本章调用真实 DeepSeek 模型
 
-一个 Agent 可以顺序处理所有工作，但相互独立的任务更适合拆分，例如同时查询多份资料或验证两个方案。串行执行会增加等待时间，把所有过程放进同一个上下文又会混入无关信息。Subagent（子 agent）机制允许父 agent 委派独立任务，再收集和汇总结果；Jobs 负责后台生命周期，Workflow 负责有上限的批量编排。
+一个智能体可以按顺序处理所有工作，但相互独立的任务更适合拆开，例如同时查询多份资料或验证两个方案。逐个执行会增加等待时间，把所有过程放进同一段对话又会混入无关信息。
 
-官方把委派做成一个面向模型的工具。模型在需要拆分时主动调用它，参数就是子任务描述；工具再把请求交给具名 provider。本章从隔离的一次性子任务出发，继续加入 fork、continuable 会话、owner 隔离的后台 job 和 Python Workflow 教学引擎。
+本章用子智能体处理独立任务：父智能体提交一段完整的任务说明，子智能体在自己的会话中完成工作，再返回结果。随后继续加入三项能力：从父会话复制已完成历史、向同一个子智能体继续发送消息，以及在后台并发执行一批任务。代码中的 `Subagent`、`Jobs` 和 `Workflow` 分别对应子智能体、后台任务和工作流。
 
 ## 学习目标
 
 完成本章后，你将能够：
 
-- 判断哪些任务适合委派给上下文隔离的子 agent；
+- 判断哪些任务适合交给上下文隔离的子智能体；
 - 用独立 `Session` 运行子任务并返回结构化结果；
 - 使用线程池并行执行多个互不依赖的子任务；
-- 只继承父会话最后一个完整 turn，创建 fork 子 agent；
-- 继续投递消息或中断 continuable 子 agent；
-- 使用 owner 隔离的 Jobs 和有并发/总量上限的 Workflow。
+- 只继承父会话中已经完整结束的轮次，创建分支子智能体；
+- 向可继续的子智能体发送后续消息或中断当前任务；
+- 使用所有权隔离的后台任务和带有并发、总量上限的工作流。
 
 ## 14.1 原理：为什么子任务要隔离
 
-假设父 agent 已经积累了数万 token 的对话历史，现在只需要委派一个“查询某个函数最新文档”的子任务。如果子 agent 继承父 agent 的全部历史，会带来三个问题：
+假设父智能体已经积累了数万 token 的对话历史，现在只需要委派一个“查询某个函数最新文档”的子任务。如果子智能体继承全部父会话，会带来三个问题：
 
 - 每次子任务请求都要重复发送数万 token，增加成本；
 - 父历史中的无关内容会干扰子任务；
 - 子任务过程继续写入同一份历史，会让上下文增长得更快。
 
-采用上下文隔离后，子 agent 只接收一条自包含的 task 描述，不继承父历史。代价是 task 必须提供完成任务所需的信息；收益是每个子任务都从较小且相关的上下文开始。demo 第 ③ 节会展示子 agent 的完整输入，其中只有 system 与 task 两条消息。
+采用上下文隔离后，子智能体只接收一条内容完整的任务说明，不继承父会话。这样可以减少无关信息和输入成本，但父智能体必须把完成任务所需的背景写清楚。示例会展示子智能体的完整输入，其中只有系统提示词和任务两条消息。
 
-官方有一个例外：fork。它创建一个进程内子 agent，以父 agent 已完成的对话轮次作为初始内容，适合换个角度继续同一个问题。本章实现同一条边界：只复制到最后一个 `turn/end`，当前开放 turn 整段排除，避免把尚未结算的 assistant/tool 配对带进子会话。
+有时子任务确实需要已有对话，例如从另一个角度继续分析当前问题。这时可以使用 fork（分支），把父会话中已经完整结束的轮次作为子会话的起点。代码只复制到最后一个 `turn/end`，不会带入尚未完成的当前轮，避免留下不完整的模型回复或工具调用。
 
-## 14.2 run_subagent：独立的小型 Agent
+## 14.2 运行一个独立子智能体：run_subagent
 
 ```python
 @dataclass(frozen=True)
@@ -72,11 +72,11 @@ def run_subagent(client, task, system_prompt, max_steps=3, session=None) -> Suba
 
 三个教学要点：
 
-1. 默认全新 Session 是隔离的第一道墙。子 agent 的会话日志从 turn/start 开始，只写 task 与自己的回复，父历史在物理上进不来；completed、max-steps、interrupted 与 error 退出路径都会补上 turn/end。
-2. 结构化的结果：SubagentResult 区分 output、stop_reason 与 diagnostic，对应官方 SubagentRun.result 的三个字段。被截断的回答不会被报告为成功，也不会被悄悄丢弃。子 agent 跑到一半失败时，已经生成的内容仍放在 output；provider 或运行时错误只放在 diagnostic，不能伪装成子 agent 说过的话。
-3. 错误转结果：异常不向上抛，转成 `stop_reason="error"`，具体原因单独放进 diagnostic。父 agent 因而能区分失败类别、诊断信息与部分回答，再决定重试还是换路。
+1. 默认创建全新 `Session`。子智能体的日志只记录当前任务和自己的回复，父会话不会自动进入其中；正常完成、达到步骤上限、中断和错误等路径都会写入 `turn/end`。
+2. `SubagentResult` 把输出 `output`、停止原因 `stop_reason` 和诊断信息 `diagnostic` 分开。子智能体运行到一半失败时，已经生成的内容仍放在 `output`；模型服务或运行时错误只放在 `diagnostic`，不会伪装成子智能体的回答。
+3. 异常会转换成 `stop_reason="error"` 的结果。父智能体因此能够区分正常回答、部分回答和失败原因，再决定是否重试或改用其他方案。
 
-fork seed 由一个很小的日志切片函数生成：
+分支会话的初始内容由一个很小的日志切片函数生成：
 
 ```python
 def fork_session(parent: Session) -> Session:
@@ -89,11 +89,11 @@ def fork_session(parent: Session) -> Session:
     return Session.from_log(parent.events[:last_turn_end + 1])
 ```
 
-没有完整 turn 时返回空 Session。这里复制事件值，不共享父 Session 对象；父子后续追加互不影响。
+父会话还没有完整轮次时返回空会话。这里复制事件值，不共享父会话对象，因此父子双方后续追加内容时互不影响。
 
 ## 14.3 并行：多个子任务同时跑
 
-父 agent 一轮请求了两个 subagent 调用，串行执行的总耗时是两个子任务之和。并行执行用线程池：
+如果父智能体一次请求两个子任务，依次执行的总耗时接近两项任务用时之和。对于主要等待网络响应的独立任务，可以使用线程池并行执行：
 
 ```python
 def run_subagents_parallel(specs, client) -> list[SubagentResult]:
@@ -105,11 +105,11 @@ def run_subagents_parallel(specs, client) -> list[SubagentResult]:
         return [future.result() for future in futures]
 ```
 
-DeepSeekClient.chat 是同步阻塞调用，大部分时间在等网络，线程池让多个等待同时进行，总耗时约等于最慢的那个子任务。demo 第 ② 节的计时会证明这一点。官方的工具调度器只并行执行声明为并发安全的调用；subagent 工具符合这一条件，结果仍按模型给出的顺序提交。教学版只实现这一种并行场景。
+`DeepSeekClient.chat` 是同步调用，大部分时间在等待网络响应。线程池让这些等待同时发生，因此总耗时通常接近最慢的那个子任务。只有互不修改共享状态的任务才适合这样并行；返回结果仍按输入顺序排列。
 
 ## 14.4 委派工具：模型主动拆任务
 
-把 `run_subagent` 包装成第 02 章风格的 Tool，模型就能在需要时主动拆分：
+把 `run_subagent` 包装成第 02 章介绍的工具后，模型就能在需要时主动拆分任务：
 
 ```python
 subagent_tool = Tool(
@@ -133,47 +133,47 @@ subagent_tool = Tool(
 )
 ```
 
-description 明确说明“子 agent 看不到当前对话历史，只看到 task 描述”，用于引导模型生成自包含的 task。这是上下文隔离的必要配套，也说明第 02 章中的工具说明书会直接影响模型如何使用工具。
+工具说明明确写出“子智能体看不到当前对话历史，只看到任务描述”，用于提醒模型提供完整背景。这是上下文隔离的必要条件，也说明工具描述会直接影响模型怎样使用工具。
 
-## 14.5 continuable：同一个子 Session 继续对话
+## 14.5 向同一个子智能体继续发送消息
 
-官方把生命周期和调度分成两个维度：
+子智能体的会话是否保留，以及父智能体是否等待结果，是两个不同问题：
 
 | 维度 | 选项 | 含义 |
 |------|------|------|
-| 生命周期 | `one-shot` | 一次任务、一个结果；可前台等待，也可作为后台 job 运行 |
-| 生命周期 | `continuable` | 子 agent 有持久会话和独立 inbox，可以继续发消息；官方还支持冷恢复 |
-| 调度 | foreground | 父 agent 等待结果，再继续当前 step |
-| 调度 | background | 立即返回 job id 或 child id，父 agent 继续工作，结果稍后通过通知或查询获取 |
+| 会话方式 | 一次性 `one-shot` | 完成一个任务后结束；既可以等待结果，也可以放到后台运行 |
+| 会话方式 | 可继续 `continuable` | 子智能体保留独立会话，后续还可以继续发送消息 |
+| 运行方式 | 前台 `foreground` | 父智能体等待结果，再继续当前步骤 |
+| 运行方式 | 后台 `background` | 立即返回任务或子智能体编号，稍后再查询结果 |
 
-`one-shot` 默认前台，`continuable` 默认后台。两者不是同一个概念：一次性任务也能后台跑，可继续子 agent 也能暂时前台等。
+一次性子任务默认在前台运行，可继续子智能体默认在后台运行。但两组概念彼此独立：一次性任务也可以放到后台，可继续子智能体也可以暂时在前台等待。
 
-教学版 `ContinuableSubagent` 保留一个独立 Session，并用单 worker 的 `ThreadPoolExecutor` 作为 FIFO inbox。`submit_message()` 在队列接收消息后立即返回 Future，即使 child 正在运行也能继续投递；`send_message()` 复用同一队列但同步等待这一条消息完成。`interrupt()` 设置当前 turn 的取消信号；同步模型请求无法被硬中止，因此运行器在调用前后检查信号，并把已知的部分输出与 `interrupted` 终态分开结算。
+`ContinuableSubagent` 保留一份独立会话，并使用只有一个工作线程的线程池按先到先得顺序处理消息。`submit_message()` 把消息放入队列后立即返回，即使子智能体仍在工作也能继续投递；`send_message()` 使用同一队列，但会等待当前消息处理完成。`interrupt()` 设置取消信号。同步模型请求无法在执行中途强制停止，因此程序会在调用前后检查信号，并把已经生成的部分内容与“已中断”状态分开返回。
 
-`SubagentManager` 以 owner id 保存 child。`get()`、`list()` 和后续消息都要求相同 owner，兄弟 root 不能只凭 child id 越权访问。关闭 manager 时会先中断并回收所有 child。教学版没有冷恢复、report 工具、provider 注册表、能力协商和委派深度，但 one-shot、fork、continuable 三条进程内路径已经可运行。
+`SubagentManager` 会记录每个子智能体属于哪个根智能体。读取、列举和发送后续消息时都要核对所有者，其他根智能体不能只凭子智能体编号访问它。关闭管理器时，会先中断并回收所有子智能体。
 
-官方 one-shot 失败时把非 assistant 诊断限制为 4096 个 UTF-8 字节，并与部分 output 分开。教学版保留字段分离，但没有字节截断。官方 continuable child 还能通过 report 工具选择 `next-step` 唤醒或 `quiet` 注入，本章尚未实现这条反向投递。
+教学版没有实现子智能体的跨进程恢复、主动向父智能体报告进度、能力协商和最大委派深度。它保留了最重要的三条本地路径：一次性任务、继承已完成历史的分支任务，以及可以继续对话的子智能体。更完整的差异放在章末说明。
 
-## 14.6 Jobs：后台运行与首次终态
+## 14.6 后台任务：查询、等待与取消
 
-一次性后台任务不能只返回一个线程对象，父 Agent 需要稳定 id、状态与结果。`LocalJobs` 提供 `start`、`list`、`read`、`wait` 和 `kill`：
+后台任务不能只返回一个线程对象，父智能体还需要一个稳定编号，以及查询状态、等待结果和取消任务的方法。`LocalJobs` 提供 `start`、`list`、`read`、`wait` 和 `kill`：
 
 ```python
 job = jobs.start(owner_id, operation)
 snapshot = jobs.wait(owner_id, job.id, timeout=1.0)
 ```
 
-每个 job 都绑定 owner，读取、等待和取消都会重新做所有权检查。状态从 queued 进入 running；kill 先进入 stopping，生产方真正停稳后才结算为 cancelled，避免过早释放容量。completed、failed 或 cancelled 终态由第一次结算决定，后到的结果不能覆盖。
+每个后台任务都绑定所有者，读取、等待和取消时都会重新检查。状态从排队中 `queued` 进入运行中 `running`；收到取消请求后先进入正在停止 `stopping`，任务真正结束后才记为已取消 `cancelled`。完成、失败或取消等最终状态只记录第一次结果，后来到达的结果不能覆盖它。
 
-准入按 owner 统计 queued、running 与 stopping，达到上限时会在分配 id 和调用 operation 之前拒绝；终止历史不占容量。取消采用协作式 Event，operation 必须主动检查它，Python 线程不能被安全强杀。`close()` 会向全部 job 发取消信号并等待线程池回收。教学版没有官方 completion notice、保留期限、持久化或跨进程恢复。
+系统按所有者统计排队、运行和正在停止的任务。达到上限时，在分配编号和执行函数之前就拒绝新任务；已经结束的历史记录不占用名额。取消通过一个协作信号完成，任务函数必须主动检查，因为 Python 线程不能被安全地强制终止。`close()` 会向全部后台任务发送取消信号，并等待线程池回收。
 
-## 14.7 Workflow：有上限的批量编排
+## 14.7 工作流：有上限地批量执行
 
-模型逐轮决定“再启动一个子 agent”灵活但昂贵。已知的扇出任务更适合一次 Workflow：先确定输入与阶段，再按并发上限执行。
+让模型逐轮决定“再启动一个子智能体”虽然灵活，却会增加模型调用次数。如果一开始就知道有一批相互独立的任务，更适合用工作流一次提交，再按照并发上限执行。
 
-`WorkflowEngine.parallel()` 并发运行一组 thunk，结果保持输入顺序，单项失败投影为 `None`。`pipeline()` 让每个 item 连续跑完自己的 stages，不在每个 stage 之间设置全局 barrier，因此快项不必等待慢项才能进入下一阶段。`max_concurrency` 限制同时运行数，`max_agents` 限制一次 run 或 pipeline 的总启动量。
+`WorkflowEngine.parallel()` 并发运行一组无参数任务函数，结果仍保持输入顺序，单项失败时对应位置为 `None`。`pipeline()` 让每个输入依次完成自己的多个阶段，不要求所有输入完成同一阶段后才能继续，因此较快的任务无需等待较慢任务。`max_concurrency` 限制同时运行数，`max_agents` 限制一次工作流最多启动多少个子任务。
 
-官方 rc.8 在 Worker Thread 中执行受限 JavaScript 脚本，并暴露 `agent`、`pipeline`、`parallel`、`phase` 和 `log` hooks。教学版直接运行 Python callable，只保留编排与上限语义；线程不是隔离或安全边界，绝不能执行不可信脚本。
+教学版直接运行 Python 函数，只演示任务编排和数量限制。线程不构成安全隔离，因此不能用它执行不可信代码。官方参考版本使用 Worker Thread 执行受限 JavaScript 脚本，提供的接口和安全边界更完整。
 
 ## 14.8 运行完整示例
 
@@ -217,37 +217,39 @@ uv run python chapters/14-subagents-workflow/src/demo.py
 2. **7 × 2 = 14**
 ```
 
-前三节不访问网络：① 直接展示 fork 只继承完整 turn、continuable 可以继续投递且 child 受 owner 隔离；② 展示后台 Job 的状态结算；③ 展示 Workflow 的并发与逐项 pipeline。后四节才调用真实 API：模型发出两个自包含的 subagent 调用，并行执行后把结果交还主 agent 汇总。这样每个本章源码模块都能从 demo 入口实际观察。
+前三节不访问网络：① 展示分支子智能体只继承完整轮次、可继续子智能体能够接收后续消息，而且子智能体只能由自己的父智能体访问；② 展示后台任务的状态变化；③ 展示工作流的并发与分阶段执行。后四节才调用真实 API：模型发出两个内容完整的子任务，并行执行后把结果交给主智能体汇总。这样可以从同一个示例观察本章各模块的作用。
 
-## 14.9 进入 Capstone
+## 14.9 在第 17 章中的使用方式
 
-第 17 章沿用官方默认 bundle 的工具分工：`subagent` 创建 isolated one-shot/continuable child，`subagent_fork` 只创建继承到最后完整 turn 的 one-shot child；两者都能选择前后台。后台 one-shot 返回 `job_id`，交给 `job_output`、`job_list` 和 `job_kill` 结算。后台 continuable 则在 FIFO inbox 接收首条消息后立即返回 `child_id` 与 accepted，后续 `send_message` 也只确认投递，不等待 child 回答，因此不会额外创建普通 Job。`interrupt_agent` 控制 continuable child，`workflow` 执行有上限的多子任务扇出。所有 child 和 job 都绑定当前 root owner。
+第 17 章会注册两类委派工具：`subagent` 创建全新的一次性或可继续子智能体，`subagent_fork` 创建继承父会话已完成轮次的一次性子智能体。两者都可以在前台或后台运行。
+
+一次性后台任务返回 `job_id`，再由 `job_output`、`job_list` 和 `job_kill` 查询或取消。可继续子智能体返回 `child_id`，后续使用 `send_message` 投递消息，使用 `interrupt_agent` 中断当前工作。`workflow` 用于批量执行数量受限的子任务。所有子智能体和后台任务都绑定当前根智能体，不能跨任务访问。
 
 ## 本章小结
 
-- `run_subagent`：独立 Session 的子 agent 循环、结构化结果、失败诊断与部分文本分离
-- `fork_session`：只继承到最后一个完整 turn 的日志前缀
-- `ContinuableSubagent` / `SubagentManager`：持久子 Session、继续消息、中断与 owner 隔离
+- `run_subagent`：在独立会话中运行子智能体，并分开返回输出、停止原因和诊断信息
+- `fork_session`：只继承到父会话最后一个完整轮次
+- `ContinuableSubagent` 与 `SubagentManager`：保留子会话、继续发送消息、中断任务并检查所有者
 - `run_subagents_parallel`：线程池并行
-- `create_subagent_tool`：委派工具，description 引导自包含 task
-- `LocalJobs`：后台状态机、协作式取消和首次终态
-- `WorkflowEngine`：parallel、逐项 pipeline、顺序结算和两层上限
+- `create_subagent_tool`：通过工具说明要求模型提供完整的子任务背景
+- `LocalJobs`：管理后台任务状态、协作式取消和最终结果
+- `WorkflowEngine`：并行执行、分阶段处理、保持结果顺序并限制任务数量
 
 ## 对照官方
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/subagent/tool-subagent/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/subagent/tool-subagent/README.zh.md) | `create_subagent_tool`、Capstone `subagent` | 对齐模型面委派、失败诊断与部分文本分离，以及前后台选择 |
-| [`packages/subagent/subagent/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/subagent/subagent/README.zh.md) | `run_subagent`、`ContinuableSubagent` | 教学版实现进程内 one-shot 与 continuable；没有具名外部 provider 和冷恢复 |
-| [`packages/subagent/subagent-fork-in-process/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/subagent/subagent-fork-in-process/README.zh.md) | `fork_session` | 对齐只继承父级最后一个完整 turn 前缀；教学版没有官方创建窗口内的能力过滤 |
-| [`packages/subagent/subagent-codex/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/subagent/subagent-codex/README.zh.md) / [`subagent-claude-code`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/subagent/subagent-claude-code/README.zh.md) | （未实现） | 官方 provider 可委派给原生 Codex 或 Claude Code；二者都是隔离上下文的一次性运行 |
-| [`packages/jobs/jobs-local/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/jobs/jobs-local/README.zh.md) | `LocalJobs` | 对齐 owner 隔离、查询/等待/取消与首次终态；教学版没有 notice、TTL 和持久化 |
-| [`packages/workflow/tool-workflow/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/workflow/tool-workflow/README.zh.md) | `WorkflowEngine`、Capstone `workflow` | 对齐批量 agent 编排和上限；教学版使用 Python callable，不执行官方 Worker Thread JavaScript |
+| [`packages/subagent/tool-subagent/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/subagent/tool-subagent/README.zh.md) | `create_subagent_tool`、第 17 章的 `subagent` | 对齐模型发起委派、分开返回失败诊断与部分文本，以及前后台选择 |
+| [`packages/subagent/subagent/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/subagent/subagent/README.zh.md) | `run_subagent`、`ContinuableSubagent` | 教学版在当前进程中实现一次性和可继续对话的子智能体；没有具名外部服务和跨进程恢复 |
+| [`packages/subagent/subagent-fork-in-process/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/subagent/subagent-fork-in-process/README.zh.md) | `fork_session` | 与官方一样只继承父会话到最后一个完整轮次为止；教学版没有创建期间的能力过滤 |
+| [`packages/subagent/subagent-codex/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/subagent/subagent-codex/README.zh.md) / [`subagent-claude-code`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/subagent/subagent-claude-code/README.zh.md) | （未实现） | 官方可以把任务委派给独立的 Codex 或 Claude Code 进程；两者都使用隔离上下文完成一次性任务 |
+| [`packages/jobs/jobs-local/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/jobs/jobs-local/README.zh.md) | `LocalJobs` | 与官方一样按所有者隔离任务，并支持查询、等待和取消；教学版没有完成通知、自动过期和持久化 |
+| [`packages/workflow/tool-workflow/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/workflow/tool-workflow/README.zh.md) | `WorkflowEngine`、第 17 章的 `workflow` | 对齐批量智能体编排和数量限制；教学版使用 Python 函数，不执行官方 Worker Thread JavaScript |
 
 ## 练习
 
-1. **隔离的代价。** 让父 agent 委派一个依赖上文的任务，例如继续上面的重构，观察子 agent 缺少哪些必要信息；再把这些信息写进 task 后重试，比较两次结果，说明隔离为什么要求 task 自包含。
-2. **失败传播。** 给子 agent 的 system_prompt 里加入总是回答我不知道的设定，观察 SubagentResult 与主 agent 收到 completed 但无意义的输出时的表现；再模拟子 agent 抛异常，比如断网，观察 `stop_reason="error"`、diagnostic 与部分 output 如何保持分离。
-3. **fork 语义。** 在父 Session 尾部构造一个未闭合 turn，运行 `fork_session()`，证明 child 只继承此前完整 turn；再对比隔离版与 fork 版的 token 消耗。
-4. **停止占位。** 启动一个忽略取消、稍后返回的 job，先 kill，确认状态是 stopping 且新 job 被容量门拒绝；让旧 operation 返回后再 wait，确认最终是 cancelled。
-5. **workflow 上限。** 用三个 item、两个 stage 推演 pipeline 的启动计数，再把 `max_agents` 设为 5，验证它在创建线程前拒绝整批运行。
+1. 哪些任务适合委派，哪些任务留在主智能体中更好？请从上下文依赖、可并行性、结果可验证性和沟通成本四个方面分析，并给出正反两个例子。
+2. 全新会话、继承父会话和可继续对话的子智能体分别适合什么场景？为“独立查资料”“从现有讨论换个角度分析”“持续跟进测试修复”选择方式，并说明错误选择会浪费什么资源或丢失什么信息。
+3. 为一个多来源研究任务设计后台任务和工作流：明确并发上限、总任务预算、取消方式、失败处理和结果顺序。部分来源失败时，父智能体应继续汇总还是让整批失败？说明判断标准。
+4. 子智能体返回 `completed` 不代表结果一定正确。父智能体可以怎样利用引用、结构化输出、交叉验证和诊断信息判断结果质量？哪些内部错误适合进入诊断，哪些内容适合交给用户？
+5. 实现一个包含两个阶段的子智能体工作流：第一阶段并行收集或分析独立材料，第二阶段汇总结果。它应处理至少一个失败或取消分支，并把最终输出、停止原因与诊断信息分开返回。

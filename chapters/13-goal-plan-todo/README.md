@@ -1,50 +1,50 @@
-# 13｜Goal、Plan Mode、用户问答与 Todo
+# 13｜目标、计划与任务清单
 
 > 预计时间：60 分钟 ｜ 前置：完成第 05 章（事件日志） ｜ 本章纯本地运行，不调用模型
 
-第 07 章的 Agent 能连续对话，但连续不等于有目标。一个跨小时、跨会话的长任务，比如把内部工具迁移到新框架，需要回答三个问题：现在做到哪了？要不要继续？每一小步是什么？把答案存在对话里不可靠，模型会忘、会跑题；存在内存里不持久，崩溃就丢。
+第 07 章的智能体能够连续对话，但连续对话不等于能够管理长期任务。以“把一个旧工具迁移到新框架”为例，程序需要随时回答：当前目标是什么？是否应该继续？接下来有哪些步骤？如果这些信息只写在普通对话里，模型可能忽略它们；如果只存在内存中，程序退出后又会丢失。
 
-官方把长期状态和临时决策拆成不同能力：
+本章把这些信息分成四类，各自解决一个问题：
 
-- Goal：当前长任务的唯一目标，带生命周期状态机，active、paused、complete、blocked 四相，所有变更作为事件进会话日志；
-- Plan Mode：当前 Session 是否处于“先调查和设计、暂不实施”的协作状态，最后一条 `plan/mode` 事件获胜；
-- User Questions：独立的单 provider seam，模型工具或 Plan Mode 可以暂停并等待结构化人类答案；
-- Todo：当前工作的任务清单，模型用整体替换的方式维护。
+- 长期目标（Goal）：记录当前唯一的目标，以及它正在进行、暂停、完成还是阻塞；
+- 计划模式（Plan Mode）：表示当前会话是否只调查和设计，暂不开始实施；
+- 用户问答（User Questions）：让智能体暂停并取得结构化的人类选择；
+- 任务清单（Todo）：记录眼前需要完成的几项工作。
 
-官方 goal 包将它定义为“事件溯源的同会话目标状态”。这与第 05 章的会话日志采用相同模型：当前状态由事件投影得到，日志是持久化依据。
+四类信息都写入第 05 章的会话日志，需要恢复时再从事件中重新计算当前状态。这样，任务管理不会成为一份与对话历史相互矛盾的独立数据。
 
 ## 学习目标
 
 完成本章后，你将能够：
 
-- 使用 active、paused、complete、blocked 表示 Goal 生命周期；
-- 用 `GoalRef` 的 id 与 revision 拒绝基于旧状态的修改；
+- 使用 `active`、`paused`、`complete` 和 `blocked` 表示目标状态；
+- 用 `GoalRef` 中的目标编号和版本号拒绝基于旧状态的修改；
 - 把目标变更写入会话日志，并通过重放恢复当前目标；
-- 在 step 边界提交 Plan Mode 选择，并通过用户明确评审退出；
-- 使用单 provider 用户问答 seam 传递问题与结构化答案；
-- 使用整体替换的方式维护并校验 Todo 清单。
+- 在下一步骤开始时提交计划模式的切换，并通过用户明确评审退出；
+- 使用统一的用户问答服务传递问题与结构化答案；
+- 使用整体替换的方式维护并校验任务清单。
 
-## 13.0 Plan Mode 与用户问答为什么分开
+## 13.1 计划模式与用户问答为什么分开
 
-Plan Mode 是日志中的协作状态，不是文件权限。开启后，下一次 Prompt 会多一段“先调查和设计”的引导；真正能否写文件仍由第 10、11 章的 Sandbox 和审批策略决定。
+计划模式是一种协作状态，不是文件权限。开启后，下一次系统提示词会增加“先调查和设计、暂不实施”的要求；真正能否写文件或执行命令，仍由第 10、11 章的权限与审批规则决定。
 
-`UserQuestionService` 则只负责“把结构化问题交给当前 UI provider，并等待答案”。它只允许一个 provider，拒绝空问题批次，调用方提供 Agent 时还要验证它是精确 live root；由其他 Agent 所有的 child 不能把父任务卡在无人回答的交互上。
+`UserQuestionService` 只负责把结构化问题交给当前交互界面，并等待用户回答。同一时间只能有一个界面提供这项服务，空问题会被拒绝。只有当前任务最外层的智能体可以发起提问，子智能体不能让父任务停在一个无人处理的提问上。
 
-`exit_plan_mode` 始终注册。它只在执行时校验当前模式，要求完整计划以 `#` 标题开头，并提交一个带 `plan-review` intent 的问题。只有唯一的 `Approve` 选择且没有 custom 文本才算批准。
+退出计划模式的工具 `exit_plan_mode` 始终存在，但只有当前确实处于计划模式时才能成功执行。它要求智能体提交一份以 Markdown 标题开头的完整计划，再向用户发起确认。只有用户明确选择 `Approve`，并且没有附加修改意见，计划才算通过。
 
-批准后不会立刻追加 `plan/mode=false`。控制器先保存 pending 选择，下一次已接受的 step 边界再提交，因此同一 assistant 工具批次中的剩余调用仍使用原来的 Plan Mode Prompt。这也避免模式切换让工具 schema 发生变化。
+批准后不会立刻关闭计划模式。控制器先保存一项待生效的选择，到下一步骤开始时再写入 `plan/mode=false`。这样，同一批模型工具调用中的剩余操作仍使用原来的提示词和工具清单，不会在执行到一半时改变运行条件。
 
-## 13.1 原理：为什么目标需要状态机
+## 13.2 为什么目标需要明确状态
 
-Agent 连续跑了三个小时的长任务，中途可能发生这些事：
+智能体执行一个持续数小时的任务时，可能遇到这些情况：
 
 - 用户说先停一下，目标该暂停，还是销毁？
 - 依赖的上游服务挂了，目标是失败，还是等待？
-- 会话崩溃后从磁盘恢复，目标还活着吗，会自动继续吗？
+- 程序中断后从磁盘恢复，目标是否仍然存在，又是否应该自动继续？
 
-每一件事都要求目标有明确的 phase（阶段），并且阶段之间的迁移有明确规则。官方定义了四个阶段与六个动词：
+这些情况要求目标拥有明确状态，并规定哪些状态可以相互转换。代码使用四个状态和六种操作：
 
-| 动词 | 效果 | 官方语义 |
+| 操作 | 效果 | 状态变化 |
 |------|------|----------|
 | `create` | 建立目标 | revision=1、phase=active、启用续行 |
 | `edit` | 改目标文本 | 保留 phase、blocker reason 与 activation |
@@ -52,13 +52,13 @@ Agent 连续跑了三个小时的长任务，中途可能发生这些事：
 | `complete` | 完成 | 停用续行 |
 | `block` | 阻塞 | 记录文本说明，只用一个持久 phase |
 
-两个关键的官方设计决策：
+这里有两条重要规则：
 
-决策一，最多只有一个当前目标。不允许同时进行三个目标的模糊状态，长任务的推进逻辑要求此刻唯一要完成的事永远清楚。已完成的目标可以换新目标，但进行中的只能有一个。
+第一，同一时间最多只有一个当前目标。已经完成的目标可以被新目标替换，但不能同时维护多个含义不清的进行中目标。
 
-决策二，续行启用状态不持久化。会话从崩溃中恢复后，即使日志中的目标 phase 仍是 active，Agent 也不会自动继续，必须显式 resume。恢复后的工作区和依赖可能已经变化，因此默认停下等待确认比自动续跑更安全。
+第二，“是否立即继续执行”不会写入持久化状态。会话从中断中恢复后，即使目标仍是 `active`，智能体也不会自动继续，必须显式调用 `resume`。恢复后的工作区和依赖可能已经变化，先停下来确认比直接继续更安全。
 
-## 13.2 GoalStore：动词与 revision 守卫
+## 13.3 用 GoalStore 和版本号保护更新
 
 目标状态的载体：
 
@@ -74,7 +74,7 @@ class Goal:
     blocker_reason: str | None = None
 ```
 
-每个动词都遵循同一个流程：校验、生成新快照、revision 加一、追加 goal/change 事件。以 resume 为例：
+每个操作都遵循相同流程：校验当前状态，生成新快照，将版本号 `revision` 加一，再追加 `goal/change` 事件。以 `resume` 为例：
 
 ```python
     def resume(self, ref: GoalRef) -> GoalRef:
@@ -85,7 +85,7 @@ class Goal:
         return GoalRef(id=current.id, revision=current.revision + 1)
 ```
 
-`_require` 使用 Compare-and-Swap 思路校验调用方持有的引用：
+`_require` 会检查调用方持有的目标编号和版本号：
 
 ```python
     def _require(self, ref: GoalRef) -> Goal:
@@ -101,9 +101,9 @@ class Goal:
         return self._current
 ```
 
-为什么每个动词都要带引用、检查 revision？看两个并发场景：Agent A 拿着 r3 的引用决定暂停，同时 Agent B 已经把目标推进到 r5。A 基于过期的状态做决定，pause 会覆盖 B 的进展。revision 守卫让基于旧状态的决策在提交时被响亮拒绝。官方也使用 `GoalRef { id, revision }` 作为比较并设置防护。
+为什么每次操作都要检查 `revision`？假设智能体 A 根据 r3 版本决定暂停目标，而智能体 B 已经把目标推进到 r5。如果仍允许 A 提交，旧决定就可能覆盖 B 的新进展。版本检查会拒绝这种基于旧状态的修改，并要求调用方重新读取当前目标。这是一种乐观并发控制方法。
 
-## 13.3 事件溯源与连续性回放
+## 13.4 从事件恢复目标
 
 每个动词最后都做同一件事，`_commit` 追加事件：
 
@@ -116,7 +116,7 @@ class Goal:
         )
 ```
 
-`goal/change` 同时记录操作名和变更后的完整快照，于是目标状态与第 05 章的会话一样可回放。`clear()` 是个例外：它写入带下一 revision 的 tombstone，明确记录“这个目标被删除了”，而不是让状态凭空消失。
+`goal/change` 同时记录操作名和变更后的完整快照，因此目标状态可以像第 05 章的会话一样通过事件重建。`clear()` 会写入一条删除标记，英文常称为 tombstone，明确记录“这个目标被删除了”，而不是让状态无缘无故消失。
 
 ```python
     @classmethod
@@ -136,13 +136,13 @@ class Goal:
         return store
 ```
 
-一个细节：`admit_round()` 追加的是带 goal source 的 `user/message`。round 是已接纳目标消息的投影，不是一次目标配置变更，因此 `rounds_started` 增加，revision 保持不变。revision 连续性只在同一目标内检查；每个新目标又从 r1 开始。
+`admit_round()` 追加的是一条注明来自目标的 `user/message`。它表示智能体开始处理新一轮目标消息，不是修改目标本身，因此只增加 `rounds_started`，不会增加 `revision`。版本连续性只在同一个目标内检查；创建新目标时重新从 r1 开始。
 
-这里的“连续性回放”是教学子集：它校验 goal id、revision、round 和 clear tombstone 的连续关系，但没有实现官方 invariant 模块的完整形状校验、非法生命周期迁移校验与时间戳单调性检查。练习 2 会继续补生命周期迁移规则。
+教学版会检查目标编号、版本号、轮次和删除标记是否连续，但没有实现官方的全部数据形状、非法状态迁移和时间戳顺序检查。练习 2 会继续设计状态迁移规则。
 
-## 13.4 Todo：整体替换式任务清单
+## 13.5 任务清单 Todo：每次写入完整列表
 
-Goal 回答做到哪了、要不要继续，Todo 回答眼前这几步是什么。官方 todo_write 工具的语义很特别：每次调用都整体替换，模型发来完整列表，不存在部分更新：
+长期目标记录任务是否继续，任务清单 Todo 则记录眼前需要完成的步骤。`todo_write` 每次接收一份完整列表，并用它替换旧列表，不提供只修改其中一项的操作：
 
 ```python
 def todo_write(
@@ -163,11 +163,11 @@ def todo_write(
 
 三个设计意图：
 
-1. 整体替换让日志自洽。每个 `todo/write` 事件都是完整快照，回放时后写覆盖先写，UI 与恢复永远拿到一致状态，不存在增删了一半的中间态。
-2. status 三值：pending、in_progress、completed，就三个。不加 blocked、waiting，状态越多模型越容易写错。
-3. 严格校验：content 会先 trim，再检查空值和重复；非法 status 一律拒绝。`allow_parallel_in_progress=False` 时还会拒绝多个进行中条目。错误信息本身就是给模型的指导，模型下一轮会按提示修正。
+1. 每个 `todo/write` 事件都是完整快照。恢复时只需采用最后一份列表，不会出现只增加或删除到一半的中间状态。
+2. 每项任务只有等待中 `pending`、进行中 `in_progress` 和已完成 `completed` 三种状态，避免引入含义相近的额外状态。
+3. 写入前会去除内容两端的空白，再检查空项、重复项和非法状态。`allow_parallel_in_progress=False` 时还会拒绝同时存在多个进行中任务。返回的错误会明确告诉模型应该修正什么。
 
-## 13.5 运行完整示例
+## 13.6 运行完整示例
 
 ```bash
 uv run python chapters/13-goal-plan-todo/src/demo.py
@@ -222,37 +222,38 @@ uv run python chapters/13-goal-plan-todo/src/demo.py
   Error: invalid todos: 无效的 status: "doing"（只允许 pending/in_progress/completed）
 ```
 
-观察点：① 先通过真实 `ask_user_question` 工具取得结构化答案，再通过始终注册的 `exit_plan_mode` 工具呈交计划；评审成功后先出现 pending，下一 step 才真正退出。② 里状态动词会推进 revision，`admit_round` 只推进 round；block 的阻塞原因在 resume 后被清除。③ 里拿着过期引用操作被响亮拒绝；⑤ 的两条错误信息分别要求去重和改正状态值。
+观察点：① `ask_user_question` 取得结构化答案，`exit_plan_mode` 再提交计划供用户确认；批准后先记录待生效状态，到下一步骤才真正退出计划模式。② 修改目标状态会增加 `revision`，`admit_round` 只增加已经开始的轮数；调用 `resume` 后会清除阻塞原因。③ 过期引用被明确拒绝；⑤ 的两条错误信息分别提示模型删除重复任务和改正状态值。
 
-## 13.6 进入 Capstone
+## 13.7 在第 17 章中的使用方式
 
-第 17 章把 GoalStore、PlanModeController、UserQuestionService 和 Todo 绑定到同一个 Session。模型能调用 `get_goal`、`create_goal`、`update_goal`、`todo_write`、`ask_user_question` 与始终注册的 `exit_plan_mode`；Plan Mode 的 Prompt 段每个 step 重新渲染，批准后的 pending 选择也只在下一 step 边界提交。`--rpc` 另提供 `plan.set`，用于在 Agent 外部切换协作模式。
+第 17 章会把 `GoalStore`、`PlanModeController`、`UserQuestionService` 和 Todo 绑定到同一个会话。模型可以读取和更新目标、写入任务清单、向用户提问，并提交计划供用户确认。计划模式的提示词会在每个步骤重新生成，批准后的模式变化也只在下一步骤开始时生效。`--rpc` 还提供 `plan.set`，供外部程序切换协作模式。
 
 ## 本章小结
 
-- `Goal` 快照与四阶段状态机、六动词
-- `UserQuestionService`：单 provider、稳定错误码、结构化答案与 live-root 边界
-- `PlanModeController`：日志折叠、pending 选择、稳定 exit 工具与明确评审
-- `GoalRef` 与 `_require`：id 与 revision 双重 Compare-and-Swap 守卫
-- `goal/change` 完整快照、clear tombstone 与 goal 来源消息的连续性回放
-- `todo_write`：整体替换、三值状态、trim 后去重与并行进行中策略
-- 官方两个关键决策：单一目标、续行绝不持久化
+- `Goal`：用四种状态和六种操作管理一个长期目标
+- `UserQuestionService`：统一传递结构化问题与答案，并限制由当前根智能体发起
+- `PlanModeController`：记录计划模式，让退出选择在下一步骤生效
+- `GoalRef`：通过目标编号和版本号拒绝过期修改
+- `goal/change`：保存完整目标快照，并支持从日志恢复
+- `todo_write`：整体替换任务清单，校验内容和状态
+- 恢复后不会自动续行，必须重新确认当前环境后再继续
 
 ## 对照官方
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/goal/goal/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/goal/goal/README.zh.md) | `GoalStore` | 保留事件溯源、GoalRef 守卫、单一目标、六动词、完整快照和续行不持久化；回放校验只实现连续性子集 |
-| 同上 | `admit_round` | 官方只有来源为 goal 且已准入的 `user/message` 才推进正数 Round；普通人类轮次不增加 `roundsStarted` |
+| [`packages/goal/goal/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/goal/goal/README.zh.md) | `GoalStore` | 保留从事件恢复状态、`GoalRef` 版本保护、单一目标、六种操作、完整快照和恢复后不自动续行；教学版只校验事件连续性 |
+| 同上 | `admit_round` | 官方只有已经接收且来源为目标的 `user/message` 才会增加目标轮数；普通用户对话不会增加 `roundsStarted` |
 | [`packages/todo/tool-todo/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/todo/tool-todo/README.zh.md) | `todo_write` | 对齐整体替换、完整快照、三值状态、内容校验与可配置的并行进行中策略 |
-| [`packages/interaction/user-questions/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/interaction/user-questions/README.zh.md) | `UserQuestionService` | 对齐单 provider、空批次/错误 intent/live caller 校验；教学版同步阻塞 |
-| [`packages/plan/plan-mode/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/plan/plan-mode/README.zh.md) | `PlanModeController` | 对齐最后事件获胜、边界提交、Prompt 状态与明确 plan review；未实现 `/plan` command projection |
+| [`packages/interaction/user-questions/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/interaction/user-questions/README.zh.md) | `UserQuestionService` | 与官方一样只允许一个交互界面，拒绝空问题和非法调用方；教学版会同步等待用户回答 |
+| [`packages/plan/plan-mode/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/plan/plan-mode/README.zh.md) | `PlanModeController` | 与官方一样由最后一条事件决定模式，在步骤边界提交选择，并要求用户明确评审计划；教学版没有 `/plan` 命令 |
 
-Goal、Plan Mode 与 Todo 是三个维度：Goal 决定长任务是否继续，Plan Mode 决定当前如何协作，Todo 记录眼前步骤。它们不能互相替代。
+长期目标、计划模式与任务清单分别回答三个问题：长任务是否继续、当前如何协作、眼前有哪些步骤。它们不能互相替代。
 
 ## 练习
 
-1. **并发冲突推演。** 纸笔推演两个并发操作，A 拿 r3 引用 pause，B 先 edit 到 r4，列出所有交错顺序，确认 revision 守卫如何拒绝陈旧写入。再把 B 换成 `admit_round`，解释为什么引用仍然有效。
-2. **非法迁移。** 给 GoalStore 加非法迁移校验，比如 complete 之后不允许 pause，blocked 之后不允许 complete，对比官方 invariant 模块的做法，它在候选事件进入持久日志前拒绝。
-3. **round 上限。** 把 max_rounds 设成 2，连续 admit_round 三次，观察 resume 的容量检查；讨论上限耗尽后官方要求人类做什么。
-4. **评审拒绝。** 把 provider 改为返回 `Keep planning` 和 custom feedback，验证模式保持 active、反馈进入错误结果，并说明为什么 custom 文本不能与 Approve 一起视为批准。
+1. 长期目标、计划模式、用户问答和任务清单都与任务状态有关，但时间尺度和职责不同。请为“迁移一个旧服务”设计它们的分工，并说明哪些信息不应重复保存。
+2. 一个长任务可能经历暂停、恢复、阻塞和完成。画出你认为合理的状态迁移，并说明哪些迁移必须拒绝、哪些需要人类确认，以及崩溃后如何从事件日志恢复。
+3. 计划模式只改变协作提示，不是文件权限。假设模型在计划阶段仍尝试写文件，系统还需要哪些独立控制？为什么不能依赖提示词保证安全？
+4. 两个调用方基于同一个目标版本同时更新时，其中一个操作会被拒绝。讨论这种乐观并发控制对自动化智能体和人类协作者的好处，并设计冲突后的重新读取或合并流程。
+5. 编写一个本地任务流程，组合长期目标、任务清单、计划模式和结构化用户问答：先提出计划，处理批准或反馈，再执行若干任务并更新目标。模拟一次拒绝和一次中途恢复，验证状态可以从日志重新得到。

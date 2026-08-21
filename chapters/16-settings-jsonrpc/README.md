@@ -2,38 +2,38 @@
 
 > 预计时间：55 分钟 ｜ 前置：完成第 07 章 ｜ 本章纯本地运行，不调用模型
 
-当 Agent 需要被 IDE 插件、命令行工具或网页前端调用时，外部进程必须能够发送消息、查询状态并读取结果。这带来本章的两个主题：
+当智能体需要被 IDE 插件、命令行工具或网页前端调用时，外部进程必须能够发送消息、查询状态并读取结果。这带来本章的两个主题：
 
-1. 配置：这些外部入口和 Agent 本体怎么共享同一套配置，不互相矛盾？
-2. RPC：进程之间的调用语言长什么样，错误怎么表达？
+1. 配置：外部入口和智能体怎样共享同一套设置，避免各自使用不同值？
+2. RPC：两个进程怎样用统一格式发起调用、返回结果和报告错误？
 
-官方把第二个主题做成了 Typert RPC 网关，为 Host 与 Client 两侧的 Cordis 环境提供 endpoint。教学版实现它的协议近亲 JSON-RPC 2.0，一个很小的标准，足够讲清跨进程调用的核心问题。
+RPC 是 Remote Procedure Call 的缩写，中文通常称为远程过程调用。它让一个进程能够像调用本地函数一样，请求另一个进程执行某个方法。本章使用结构简单、资料丰富的 JSON-RPC 2.0 讲解基本原理。官方采用的是 Typert RPC，两者并不兼容，具体差异放在章末说明。
 
 ## 学习目标
 
 完成本章后，你将能够：
 
-- 按 namespace 注册配置，并按“schema 默认值、组合 base、用户文档”解析；
-- 使用深度不可变快照、revision 和 Compare-and-Swap 防止配置被误改或覆盖；
+- 按命名空间注册配置，并按“程序默认值、当前组合的基础值、用户设置”依次合并；
+- 使用不可变快照和版本号防止配置被误改或被旧数据覆盖；
 - 读懂 JSON-RPC 2.0 的请求、成功响应和错误响应；
 - 实现请求解析、方法注册与分发；
 - 把不可信输入转换成结构化协议错误，而不是让服务进程退出。
 
-## 16.1 原理：配置为什么要分 namespace 和层
+## 16.1 配置为什么要分组和分层
 
-真实 Harness 由很多插件组成。模型插件可能有 `model`，搜索插件也可能有 `model`；如果所有键都塞进一个大字典，重名和归属很快变得混乱。官方让每个插件注册自己的 namespace，例如 `agent`、`web-search-deepseek`，然后在该分节内部做三层解析：
+完整的智能体由许多插件组成。模型插件可能有 `model`，搜索插件也可能有 `model`；如果所有配置项都放进一个大字典，很快就无法判断某个字段属于谁。为此，每个插件使用自己的命名空间 `namespace`，例如 `agent` 或 `web-search-deepseek`，再在这个分组内合并三层配置：
 
 ```
-schema defaults  <  composition base  <  user document
+程序默认值  <  当前组合的基础值  <  用户设置
 ```
 
-- schema defaults 是插件自带的默认值，让零配置也有合理行为；
-- composition base 是当前 profile/组装给该插件的基础配置；
-- user document 是用户真正保存的覆盖层，优先级最高。
+- 程序默认值由插件提供，使缺少用户配置时仍有合理行为；
+- 基础值由当前智能体组合提供，用来统一同一运行方式下的设置；
+- 用户设置保存在配置文件中，优先级最高。
 
-三层采用深合并。用户只改 `agent.model` 时，不会把 base 中的 `max_steps` 一并抹掉。`replace({})` 则是刻意重置用户分节，让值重新继承 base 与 defaults。
+三层配置会递归合并。用户只修改 `agent.model` 时，不会一并删除基础配置中的 `max_steps`。调用 `replace({})` 则会清空当前命名空间的用户设置，让最终结果重新继承基础值和默认值。
 
-## 16.2 Settings：注册、读取和安全写入
+## 16.2 用 Settings 注册、读取和修改配置
 
 ```python
 class Settings:
@@ -55,16 +55,16 @@ class Settings:
         )
 ```
 
-注册时会拒绝非法或重复 namespace；已有用户分节若过不了 validator，注册本身也失败。`get()` 返回深度不可变、与内部状态脱离的快照：外部不能改字典，嵌套 list 也被冻结为 tuple。
+注册时会拒绝格式错误或重复的命名空间；已有用户设置如果未通过校验，注册本身也会失败。`get()` 返回一份与内部状态分离且不可修改的快照：外部不能修改字典，嵌套列表也会转换成元组。
 
 写入有两种形态：
 
-- `update(patch)`：把 patch 深合并进用户分节；
-- `replace(section)`：整体替换用户分节。
+- `update(patch)`：把需要变化的字段递归合并到用户设置中；
+- `replace(section)`：整体替换这个命名空间下的用户设置。
 
-每个 namespace 有独立的单调 revision。配置 UI 先读到 revision 4，准备保存时别人已经写到 revision 5，那么带 `expected_revision=4` 的写入会抛出 `SettingsConflictError(code="SETTINGS_CONFLICT")`，而不是覆盖新值。这就是第 13 章 GoalRef 同一种 Compare-and-Swap 思路。
+每个命名空间有独立且只增不减的版本号 `revision`。假设配置界面先读到版本 4，准备保存时其他调用方已经写入版本 5，那么带 `expected_revision=4` 的更新会返回冲突错误，而不是覆盖新值。这与第 13 章保护目标更新的方法相同：先确认自己读取的版本仍然是最新版本，再提交修改。
 
-写入前还会做 lossless JSON 校验：拒绝循环引用、非字符串键、NaN/Infinity、负零、超出 JSON 安全范围的整数以及非 JSON 类型。`watch()` 返回幂等 disposer，解析值真正变化时回调收到 `(next, prev)`。
+写入前还会检查数据能否无损转换成 JSON，拒绝循环引用、非字符串键、`NaN`、无穷值、负零、过大的整数和其他 JSON 不支持的类型。`watch()` 用于监听配置变化，返回的取消函数可以安全地重复调用；最终配置真正发生变化时，回调会同时收到新值和旧值。
 
 ## 16.3 JSON-RPC 2.0：跨进程调用的最小语言
 
@@ -75,14 +75,14 @@ class Settings:
 { "jsonrpc": "2.0", "id": 1, "result": {"model": "deepseek-chat"} }
 ```
 
-- 请求：method 要调什么、params 传什么、id 是本次调用的编号，响应原样带回，异步时对得上号；
-- 响应：成功时包含 result，失败时包含 error。调用失败也应返回协议消息，而不是通过服务进程退出表达。
+- 请求：`method` 表示要调用的方法，`params` 保存参数，`id` 是本次调用编号；响应会原样带回编号，使调用方能够对应请求与结果。
+- 响应：成功时包含 `result`，失败时包含 `error`。调用失败也应返回符合协议的消息，而不是让服务进程直接退出。
 
-错误有标准错误码：-32700 解析失败、-32600 请求不合法、-32601 方法不存在、-32602 参数不合法。对端拿到数字就能程序化地分类处理，不用解析错误文本。
+JSON-RPC 为常见错误规定了编号：-32700 表示 JSON 解析失败，-32600 表示请求结构不合法，-32601 表示方法不存在，-32602 表示参数不合法。调用方可以根据编号分类处理，不需要分析自然语言错误文本。
 
 `RpcError` 还带一个可选的 `request_id`。彻底无法解析、无法确认请求身份时响应 id 为 null；请求结构和 id 已经有效、只是 params 类型错误时，错误响应必须原样带回该 id，调用方才能把失败对应到正确请求。
 
-## 16.4 RpcDispatcher：解析、路由、结构化错误
+## 16.4 用 RpcDispatcher 解析和分发请求
 
 ```python
 def parse_request(text: str) -> RpcRequest | RpcError:
@@ -134,7 +134,7 @@ def parse_request(text: str) -> RpcRequest | RpcError:
         return {"jsonrpc": "2.0", "id": parsed.id, "result": result}
 ```
 
-这里区分三类失败：解析失败、方法不存在和处理器内部异常，并使用 INTERNAL_ERROR 处理最后一种情况。所有路径都会得到协议响应。官方网关的 invoke 采用相同原则：每次调用都会校验具名参数、调用公开业务方法，并校验返回结果。
+这里区分解析失败、方法不存在、参数错误和处理器内部异常。所有路径都会返回 JSON-RPC 响应，使外部程序不会因为一次错误请求而失去连接。
 
 ## 16.5 运行完整示例
 
@@ -166,32 +166,33 @@ uv run python chapters/16-settings-jsonrpc/src/demo.py
   ← {"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": "Parse error: 不是合法 JSON"}}
 ```
 
-六条请求各演示一条路径：正常读取 namespace、正常回声、未知方法、参数类型错误、缺协议版本、彻底不是 JSON。每一条都得到结构化响应，包括最后两条垃圾输入。
+六条请求分别演示正常读取配置、正常回声、未知方法、参数类型错误、缺少协议版本和无法解析的文本。每一条都得到结构化响应，包括最后两条无效输入。
 
-## 16.6 进入 Capstone
+## 16.6 在第 17 章中的使用方式
 
-第 17 章在 composition root 注册 `agent` namespace，并从 `.mini-harness/settings.json` 读取用户层，统一结算 Sandbox、Shell、Skill、Jobs、Workflow、retry、pruner 与 spill 的参数。`--rpc` 在 stdin/stdout 上逐行分发 JSON-RPC，当前公开 `settings.get`、`agent.run` 和 `plan.set`；它不监听端口，也不冒充官方完整 Host/API Proxy。
+第 17 章会注册 `agent` 命名空间，并从 `.mini-harness/settings.json` 读取用户设置，统一得到文件权限、命令审批、技能目录、后台任务、工作流、模型重试和上下文控制等参数。`--rpc` 模式通过标准输入和标准输出逐行收发 JSON-RPC，目前提供 `settings.get`、`agent.run` 和 `plan.set` 三个方法，不监听网络端口。
 
 ## 本章小结
 
-- `Settings`：namespace 注册，以及 defaults < base < user 的三层深合并
-- 安全写入：不可变快照、lossless JSON、update/replace、revision 冲突与 watch
-- `parse_request`：JSON-RPC 2.0 线格式校验，失败即结构化错误
-- `RpcDispatcher`：注册、路由、三层防御
-- 标准错误码五件套
+- `Settings`：按命名空间注册配置，并依次合并默认值、基础值和用户设置
+- 安全写入：返回不可变快照，校验 JSON 数据，并用版本号发现并发冲突
+- `parse_request`：检查 JSON-RPC 2.0 请求格式，并把失败转换成结构化错误
+- `RpcDispatcher`：注册方法、查找处理函数并返回调用结果
+- 标准错误码：让调用方稳定地区分不同失败原因
 
 ## 对照官方
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/api/gateway/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/api/gateway/README.zh.md) | `RpcDispatcher` | 官方 Typert endpoint 会按 descriptor 校验具名参数和返回值；教学版用更小的 JSON-RPC 运行时校验说明协议边界 |
-| [`packages/settings/settings/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/settings/settings/README.zh.md) | `Settings` | 对齐 namespace、三层解析、深冻结快照、update/replace、revision 冲突和 JSON 校验 |
+| [`packages/api/gateway/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/api/gateway/README.zh.md) | `RpcDispatcher` | 官方的 Typert 接口会根据方法描述检查具名参数和返回值；教学版使用较小的 JSON-RPC 分发器讲解协议边界 |
+| [`packages/settings/settings/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/settings/settings/README.zh.md) | `Settings` | 与官方一样使用命名空间和三层配置，返回不可修改的快照，并检查更新版本与 JSON 数据 |
 
-官方还支持 `mutate` 路径操作、secret 脱敏描述、异步顺序 watcher、可写 provider、文件热重载和卸载排空；教学版不实现这些工程能力。官方用 Typert 而非 JSON-RPC：两端共享方法 descriptor，参数和返回值都由 schema 校验。教学版的手写 JSON-RPC 只是用最小面积讲清线格式、错误表达和信任边界，不与 Typert wire 兼容。
+官方还支持按路径修改配置、敏感字段脱敏、按顺序异步通知观察者、可替换的写入后端、文件热重载和安全卸载；教学版不实现这些工程能力。官方使用 Typert 而不是 JSON-RPC，两端共享方法描述，并据此校验参数和返回值。教学版的手写 JSON-RPC 只保留逐行消息、错误格式和输入校验，不与 Typert 协议兼容。
 
 ## 练习
 
-1. **优先级验证。** 删除 demo 的用户层 `model`，观察它回落到默认值；再在 base 中加入 `model`，确认 base 覆盖 defaults、user 又覆盖 base。
-2. **通知语义。** JSON-RPC 2.0 规定 id 为 null 的请求是通知，无需响应。给 dispatcher 加这个规则：id 为 null 时执行但不返回响应，并讨论它的适用场景，心跳、日志上报。
-3. **批量请求。** JSON-RPC 2.0 支持数组形式的批量请求，一次发多条，一次回多条。实现 dispatch_batch，单条失败不影响其他条。
-4. **错误即数据。** 把 demo 的六条往返看成协议测试用例，为每一对请求与预期响应写一个断言，体会结构化错误对自动化测试的友好，无需解析文本就能断言错误码。
+1. 一项配置同时出现在程序默认值、当前组合的基础值和用户设置中时，最终值如何确定？请设计一个包含嵌套字段的例子，并说明 `update` 与“清空用户设置、重新继承默认值”为什么是不同操作。
+2. IDE 和命令行同时读取同一版本后分别修改配置。设计一次冲突处理过程，说明版本检查为什么比后写覆盖更适合可观察的智能体设置。
+3. 为一个外部控制界面设计最小 RPC API，至少覆盖提交任务、查询状态和读取结果。定义成功响应、参数错误、未知方法和内部失败分别应向客户端暴露什么。
+4. stdio、HTTP 和 WebSocket 都能承载 RPC。比较它们在部署、并发、双向通知、认证和调试方面的取舍，并说明本章为什么使用逐行 stdio。
+5. 选择一项对外有用的操作，为 `RpcDispatcher` 增加完整方法：校验不可信参数，调用领域逻辑，返回稳定结果，并把预期失败转换成结构化错误。为成功、参数错误和方法内部失败各写一个协议示例。

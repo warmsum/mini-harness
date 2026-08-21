@@ -2,37 +2,37 @@
 
 > 预计时间：90 分钟 ｜ 前置：完成第 08 章 ｜ 本章调用真实 DeepSeek 模型，压缩摘要由模型生成
 
-长任务 Agent 会持续积累对话历史，但模型一次能够接收的输入总量受上下文窗口限制。任务运行时间越长，每轮请求携带的历史越多；接近窗口上限后，请求可能被服务商拒绝，调用成本也会明显上升。
+智能体执行长任务时会不断积累对话历史，但模型一次能够接收的内容有长度上限。任务运行得越久，每次请求携带的历史越多；接近上限后，请求可能被模型服务拒绝，调用成本也会明显上升。
 
-DeepSeek Harness 通过四个相互配合的机制处理这个问题：
+本章用四种相互配合的方法处理这个问题：
 
 1. 计量：随时知道当前历史占了窗口的百分之几；
-2. 剪枝：把历史中的超大工具结果替换成首尾片段，完整原事件仍留在日志；
-3. spill：工具刚返回超大文本时，把完整正文放进外部存储，只回灌可读取的预览；
+2. 裁剪：把历史中的超大工具结果换成首尾片段，完整原文仍留在日志中；
+3. 外部存储：工具刚返回超大文本时，把完整正文保存到文件，只把预览和读取位置交给模型；官方把这一步称为 spill；
 4. 压缩：压力仍然过高时，把最老的一段历史浓缩成一条摘要，替换掉原文。
 
-本章先估算当前请求的 token 压力，再分别处理“历史里已经存在的大结果”和“工具刚产生的大结果”，最后选择需要压缩的历史范围并运行一次真实摘要压缩。
+本章先估算当前请求大约会使用多少 token，再分别处理“历史里已经存在的大结果”和“工具刚产生的大结果”，最后选择需要压缩的旧历史，并调用模型生成摘要。
 
 ## 学习目标
 
 完成本章后，你将能够：
 
 - 解释上下文窗口、token 估算和压力比例之间的关系；
-- 使用 `TokenMeter` 估算消息与工具 schema 的输入成本；
-- 用 append-only replacement 剪枝工具结果，同时保留完整原事件；
-- 按 UTF-8 byte 预算 spill 过大结果，并生成首尾预览与读取提示；
+- 使用 `TokenMeter` 估算消息与工具说明占用的输入空间；
+- 在不修改原始日志的前提下，用较短内容替换模型看到的工具结果；
+- 按 UTF-8 字节数判断大结果，将完整内容保存到文件，并生成首尾预览与读取提示；
 - 按阈值和保留比例选择需要压缩的旧历史；
-- 生成 checkpoint 替换旧历史，并拒绝没有缩小的摘要结果。
+- 生成摘要检查点替换旧历史，并拒绝没有真正变短的结果。
 
 ## 9.1 窗口、token 与压力
 
-上下文窗口是模型一次请求能处理的最大输入量，单位是 token。token 是模型眼中的字块，一个英文单词约 1 到 2 个 token，一个汉字约 1 个 token。请求的输入等于 system 提示词、工具清单、消息历史三者的总和，这个总和叫上下文压力。
+上下文窗口是模型一次请求能处理的最大输入量，单位是 token。token 可以粗略理解为模型处理文字时使用的小片段，一个英文单词通常占 1 到 2 个 token，一个汉字通常约占 1 个 token。系统提示词、工具清单和消息历史都会占用窗口。本章把“估算用量 ÷ 窗口上限”得到的比例称为上下文压力。
 
-Agent 每轮都会追加历史，因此未压缩时压力会持续增加。达到窗口的 80% 左右后，就需要在触及服务商硬限制之前进行处理。为此，Agent 在每次请求前估算当前压力，并在超过阈值时触发压缩策略。
+智能体每轮都会追加历史，因此上下文压力会持续增加。本章把 80% 设为处理阈值：每次请求前先估算当前用量，达到阈值后再裁剪或压缩，尽量不要等到模型服务直接拒绝请求。
 
-量压力这件事有一个陷阱：精确的 token 数只有服务商知道，各家分词器是私有的。官方给了一个务实的答案，用启发式估算：每 4 个字符算 1 个 token，外加角色、块与请求 envelope 字段的结构开销。估算不精确，官方文档写明 CJK 文本与 JSON schema 会被严重低估，但目的不是记账，是判断压力趋势，80% 附近差几个百分点无所谓。引入真实 tokenizer 的复杂度换来的精度，对这个用途是浪费。
+程序在请求发出前通常拿不到服务商计算的精确 token 数，而且不同模型使用的分词方法也可能不同。本章采用一个简单估算：每 4 个字符算作 1 个 token，再加上消息角色、内容块和工具说明等结构开销。它会低估中文和大型 JSON 数据，但这里的目的只是提前判断用量是否正在接近上限，而不是计算精确账单。
 
-## 9.2 TokenMeter：4 字符 / token 的启发式
+## 9.2 用 TokenMeter 估算输入长度
 
 ```python
 CHARS_PER_TOKEN = 4
@@ -46,9 +46,9 @@ def estimate_message(message: Message) -> int:
     return estimate_tokens(content) + ROLE_OVERHEAD
 ```
 
-两个常量都直接对应官方实现。`CHARS_PER_TOKEN = 4`，字符数除以 4 向上取整，`-(-len // 4)` 是向上取整的整除写法，等价于 `math.ceil(len / 4)`。`ROLE_OVERHEAD = 4`，每条消息除了内容本身，角色标记也要占 token，启发式把它摊成固定 4。
+`CHARS_PER_TOKEN = 4` 表示每 4 个字符估算为 1 个 token。`-(-len // 4)` 是整数向上取整的写法，等价于 `math.ceil(len / 4)`。`ROLE_OVERHEAD = 4` 则为每条消息额外计算角色等结构信息的开销。
 
-工具清单同样要计费，它每次请求都随 system 发送，是 envelope 的一部分：
+工具清单也会占用输入空间，因为每次请求都要把工具名称、用途和参数结构交给模型：
 
 ```python
 class TokenMeter:
@@ -68,9 +68,9 @@ class TokenMeter:
         )
 ```
 
-`pressure` 的职责边界要单独说清楚：它只读数，不决策。超过 80% 之后怎么办，压缩、警告还是硬停，是消费方的事。这个解耦是官方明确的设计，token-meter 文档写明 meter 保持与压缩无关，压缩按需读取它。
+`pressure` 只负责计算比例，不决定超过 80% 后应该压缩、警告还是停止。把“测量”和“处理”分开后，同一个计量器可以供多种策略使用，也更容易单独测试。
 
-## 9.3 工具结果剪枝：改表层，不改原日志
+## 9.3 裁剪工具结果：缩短模型输入，不改原日志
 
 一次 `grep`、测试或构建可能返回上万字符。模型后续通常只需要开头、结尾和“中间被省略”这个事实，没必要让同一份完整输出进入每次请求。
 
@@ -82,13 +82,15 @@ def prune_content(self, text: str) -> str | None:
     return text[:self.head_chars] + PRUNE_MARKER + tail
 ```
 
-教学版默认超过 8192 个 Unicode code point 才剪枝，保留前 4096、固定 marker 和后 1024。Python `str` 切片按 code point 运行，不会把 Unicode 代理项对拆开。
+教学版默认在结果超过 8192 个字符时才裁剪，保留开头 4096 个字符、一个省略标记和末尾 1024 个字符。这里使用 Python 字符串切片，不直接按原始字节截断，因此不会切坏中文等 Unicode 字符。
 
-剪枝不能覆盖原来的 `tool/result`。`prune_session()` 扫描当前稳定表层，先追加 `compaction/prune` 记录被遮蔽节点与启发式 token 价格，再追加一个带 `surface_op=replace` 的新事件，并用 `source_event_seqs` 指回完整原事件。下一次派生消息时只看到 replacement，审计与恢复仍能读取未经修改的 append-only 历史。计量器可以用 shadow price 扣除不再进入模型的原节点；再次剪枝扫描的是替换后的表层，因此不会给同一结果反复追加 replacement。
+裁剪不能覆盖原来的 `tool/result`，否则恢复会话时就再也找不到完整结果。`prune_session()` 会追加一条 `compaction/prune` 事件记录裁剪原因，再追加一条替换事件，并通过 `source_event_seqs` 指向原事件。下一次生成模型消息时只使用较短版本，完整原文仍保留在日志中。再次扫描时看到的是已经替换后的内容，因此不会反复裁剪同一结果。
 
-## 9.4 spill：大结果先保存，再回灌预览
+官方实现还会记录被替换内容原本占用的估算空间，代码中称为 `shadow price`。这个数值用于后续计量，不影响本章理解“模型看到短版本、日志保留完整版本”的主线。
 
-剪枝处理会话里已经存在的结果，spill 则位于工具结果刚产生的边界。SpillPolicy 按 UTF-8 byte 计数，因为存储、传输和 provider 限额通常都是字节预算，而不是 Python 字符数。
+## 9.4 把大结果保存到文件
+
+上一节处理已经进入会话历史的大结果。本节处理工具刚刚返回的大结果：完整文本先保存到外部文件，模型只接收一段预览和文件位置。官方把这个过程称为 spill。`SpillPolicy` 按 UTF-8 字节数计算大小，因为文件存储和网络传输通常按字节限制，而不是按 Python 字符数限制。
 
 ```python
 result = spill_policy.transform(
@@ -99,19 +101,19 @@ result = spill_policy.transform(
 )
 ```
 
-超过 `max_inline_bytes` 时，策略先调用 `SpillStore.save_text()` 保存完整文本，再用剩余预算生成 UTF-8 安全的首尾预览，并附上 locator、遗漏字节数和读取提示。LocalSpillStore 把正文写进 session 私有目录，清理 suggested name，生成碰撞安全文件名，并尽力收紧目录和文件权限。
+结果超过 `max_inline_bytes` 后，策略先调用 `SpillStore.save_text()` 保存完整文本，再根据剩余空间生成不会切坏字符的首尾预览，并附上文件位置、被省略的字节数和读取提示。`LocalSpillStore` 把正文写入当前会话的专用目录，清理建议文件名中的危险字符，并避免覆盖同名文件。
 
-spill 是 best-effort。没有 backend、保存失败、`read` 工具本身或嵌套工具结果都原样返回，不能因为外围存储失败把一次成功工具调用改成错误。预览加 notice 若仍超过 byte 上限，也保留原文。
+外部存储失败时，策略会保留原始工具结果，而不是把一次成功调用改成失败。没有存储后端、保存出错、当前工具本身就是 `read`，或者结果来自嵌套工具调用时都会使用原文。如果预览和提示加起来仍然超过上限，也不会返回一个残缺且无法恢复的结果。
 
-两个机制解决不同时间点的问题：spill 尽量阻止大结果首次进入消息表层；pruner 在下一 step 组装出 system、消息表层和工具 schema 后先读取 token 压力，只有达到 80% 才清理仍留在历史中的超大结果。它们都不调用模型。
+两种方法处理不同时间点的问题：外部存储尽量阻止大结果首次进入模型消息；结果裁剪则在后续步骤中检查已有历史，只在上下文压力达到 80% 后处理其中仍然过大的内容。两种方法都不需要额外调用模型。
 
 ## 9.5 压缩策略：保留新，浓缩旧
 
-压力超阈值后怎么办？最直接的念头是删掉最老的消息。但直接删会丢掉上下文，模型会忘记任务目标、忘记已经做完的事。官方的策略折中在三点：
+上下文超过阈值后，最直接的办法是删除最老的消息，但这会让模型忘记任务目标和已经完成的工作。更稳妥的做法分为三步：
 
 1. 最近的历史保留原文，默认占窗口的 16%，正在进行的工作细节不能丢；
-2. 更老的历史交给模型浓缩，用一个压缩调用让模型把老历史总结成结构化的 checkpoint（检查点）；
-3. checkpoint 替换老历史，不是追加在末尾。替换之后历史真的变短了，追加只会越加越长。
+2. 更老的历史交给模型浓缩，生成一条结构化摘要；
+3. 用摘要替换旧历史，而不是把摘要继续追加到末尾。
 
 ```mermaid
 flowchart LR
@@ -120,12 +122,12 @@ flowchart LR
         A2 --> A3[新历史：最近 4 条]
     end
     subgraph 压缩后
-        B1[system] --> B2[checkpoint：1 条摘要]
+        B1[system] --> B2[摘要检查点：1 条摘要]
         B2 --> B3[新历史：最近 4 条原文]
     end
 ```
 
-阈值与保留比例都对齐官方 compaction-basic 配置表的默认值：thresholdRatio 为 0.8，retainRatio 为 0.16。
+本章使用的处理阈值是 80%，压缩后保留最近 16% 的原始内容。这两个比例与参考版本的官方默认配置一致。
 
 ## 9.6 压缩调用：让模型总结自己
 
@@ -140,13 +142,13 @@ def build_summary_prompt(messages: list[Message], tail_start: int) -> list[Messa
     ]
 ```
 
-输入等于 system 原文、被压缩区原文、一条固定的压缩指令。本章代码保留官方 compaction-basic 的提示结构，要求模型输出任务意图、技术概念、文件与代码、错误与修复、待办、当前进度、下一步、关键上下文八个小节，把对话骨架提取出来。
+压缩请求包含原始系统提示词、需要压缩的旧历史，以及一条固定的摘要指令。指令要求模型整理任务意图、技术概念、文件与代码、错误与修复、待办、当前进度、下一步和关键上下文，从长对话中提取继续完成任务所需的信息。
 
-这种输入结构还可以复用 KV cache。模型服务通常会缓存请求前缀的计算结果；连续请求具有相同前缀时，后一次请求可以复用已有计算。压缩调用先重放 system 和被压缩区原文，再追加压缩指令，这一前缀与正常请求中的对应部分逐字相同。官方文档明确说明，该结构用于复用服务商的热前缀 cache。教学版保留相同的重放顺序。
+这种排列方式还可能复用模型服务对相同请求开头的计算缓存，也就是 KV cache。压缩请求先按原顺序放入系统提示词和旧历史，最后才追加摘要指令，因此它的开头与正常请求相同。是否真正命中缓存由模型服务决定，但保持相同前缀为复用提供了条件。
 
-## 9.7 替换：checkpoint 进历史，原文退场
+## 9.7 用摘要检查点替换旧历史
 
-压缩调用的输出是纯文本摘要，把它包装成一条 checkpoint 消息：
+压缩调用返回纯文本摘要，程序把它包装成一条摘要检查点消息：
 
 ```python
 def build_checkpoint_message(summary: str) -> Message:
@@ -164,13 +166,15 @@ def replace(messages, tail_start, checkpoint):
 
 三个细节：
 
-1. checkpoint 的 role 是 user，它站在用户消息的位置上，对模型来说就是历史的一部分，正常阅读即可。
+1. 摘要检查点的角色是 `user`，它会像其他历史消息一样被模型读取。
 2. `<compacted-summary>` 标签把摘要明确框起来。模型的训练语料里见过这个标记，能正确理解这是一段被压缩的历史。
-3. preamble 开场白在标签前有一段固定说明：这是一个自动生成的检查点，把它当作已确立的背景，直接继续任务，不要复述它。没有这段话，模型可能对着摘要重复一遍历史，浪费整次压缩。
+3. 标签前还有一段固定说明，告诉模型这是自动生成的历史摘要，应把它当作已有背景继续任务，而不是重新复述一遍。
 
-这一步必须执行替换。得到 `[system, checkpoint, 新历史原文]` 后，旧历史原文不再进入后续请求。token 数量之所以降低，是因为 checkpoint 取代了原文，而不是作为附加内容继续累积。
+这一步必须执行替换。得到 `[system, checkpoint, 新历史原文]` 后，旧历史原文不再进入后续请求。token 数量之所以降低，是因为摘要取代了原文，而不是作为附加内容继续累积。
 
-## 9.8 失败处理：摘要必须真的更小
+这里的 checkpoint 表示“帮助模型继续任务的历史摘要”，与第 08 章“在重要操作前保存日志”的持久化检查点用途不同。两者沿用官方名称，但解决的是不同问题。
+
+## 9.8 失败处理：摘要必须真的变短
 
 压缩调用的输出不可控，模型可能写一篇比原文还长的摘要。所以压缩必须带缩小校验：
 
@@ -184,7 +188,7 @@ def replace(messages, tail_start, checkpoint):
             continue  # 重试：官方 compactionRetries 默认 1
 ```
 
-`continue` 会再次发起压缩调用，最多重试 compactionRetries 次，默认值为 1。重试后摘要仍未缩小时，系统保留原文并继续运行。官方文档说明，自动压缩路径此时只记录警告，并携带完整的超预算历史继续；压缩失败不能破坏原有会话。
+摘要不一定比原文短，因此程序必须重新估算长度。摘要没有缩小时，`continue` 会再次发起压缩调用；重试次数由 `compactionRetries` 控制，默认重试一次。如果仍然没有缩小，程序保留原文并记录警告，不能因为压缩失败而破坏原有会话。
 
 ## 9.9 运行完整示例
 
@@ -192,7 +196,7 @@ def replace(messages, tail_start, checkpoint):
 uv run python chapters/09-context-engineering/src/demo.py
 ```
 
-demo 先在本地展示工具结果剪枝和 spill，再用一个缩小的上下文窗口（4000 token，教学用）让压力容易触顶。长会话由脚本构造，不调用模型，只有压缩摘要由真实模型生成。checkpoint 的内容与 token 数每次不同，其余结构稳定：
+示例先在本地展示工具结果裁剪和外部存储，再把上下文窗口缩小到 4000 token，使演示数据容易超过阈值。长会话由脚本构造，不调用模型；只有生成摘要时会发起真实模型请求。摘要内容与 token 数每次可能不同，其余结构稳定：
 
 ```
 === ① 工具结果剪枝：表层变短，原事件仍保留 ===
@@ -241,32 +245,32 @@ demo 先在本地展示工具结果剪枝和 spill，再用一个缩小的上下
   - User is building a GRPO training system ...
 ```
 
-前两节分别证明剪枝不覆盖原日志、spill 不丢失完整结果。后四节将 25 条消息压缩为 5 条，估算 token 从 4334 降到 1538，占用率从 108.3% 降到 38.5%。输出末尾展示了 checkpoint 正文，其中保留了任务意图、技术要点和下一步等结构化信息。
+前两节分别证明结果裁剪不会覆盖原日志，外部存储也不会丢失完整结果。后四节将 25 条消息压缩为 5 条，估算 token 从 4334 降到 1538，占用率从 108.3% 降到 38.5%。输出末尾展示了摘要正文，其中保留了任务意图、技术要点和下一步等结构化信息。
 
 ## 本章小结
 
-- `TokenMeter`：4 字符/token 启发式、消息与工具 envelope 计量、压力换算，只读数不决策
-- `ToolResultPruner`：Unicode code point 阈值、shadow price、head/middle/tail replacement、完整原事件保留
-- `SpillPolicy`：UTF-8 byte 预算、provider seam、首尾预览、locator 与 best-effort 回退
+- `TokenMeter`：估算消息与工具说明的 token 用量，只负责测量，不决定怎样处理
+- `ToolResultPruner`：缩短模型看到的旧工具结果，同时保留完整原事件
+- `SpillPolicy`：按 UTF-8 字节数判断大结果，保存完整原文并返回首尾预览与文件位置
 - `should_compact` / `select_shadowed_start`：80% 阈值、尾部保留 16%
-- 压缩调用：逐字复刻官方压缩指令、重放前缀复用 KV cache
-- `build_checkpoint_message` / `replace`：preamble 加标签包装、替换而非追加
+- 压缩调用：保留请求前缀，并让模型生成结构化摘要
+- `build_checkpoint_message` 与 `replace`：包装摘要，用它替换旧历史而不是继续追加
 - 失败处理：缩小校验、重试、保留原文继续
 
 ## 对照官方
 
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
-| [`packages/llm/token-meter/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/token-meter/README.zh.md) | `TokenMeter` | 教学版保留 4 字符/token 启发式；官方还能复用提供方真实用量并跟踪 projectedTokens |
-| 同上 | 解耦 | 官方 meter 与模型路由、压缩策略无关，压力判定留给消费方 |
-| [`packages/compaction/compaction-basic/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/compaction/compaction-basic/README.zh.md) | `compact` | 对齐 0.8/0.16 阈值、KV cache 重放、缩小校验、重试与失败保留原文 |
-| [`packages/compaction/compaction-tool-result-pruner/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/compaction/compaction-tool-result-pruner/README.zh.md) | `ToolResultPruner` | 对齐 append-only surface replacement、head/tail 保留与完整来源事件；教学版只有纯文本块 |
-| [`packages/spill/spill/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/spill/spill/README.zh.md) | `SpillPolicy`、`LocalSpillStore` | 对齐 byte 预算、provider seam、locator 和 best-effort；教学版只实现 local text provider，没有 dispatch-log 分支 |
+| [`packages/llm/token-meter/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/token-meter/README.zh.md) | `TokenMeter` | 教学版使用每 4 个字符约等于 1 个 token 的估算；官方还能使用模型服务返回的真实用量，并跟踪下一次请求的预计长度 |
+| 同上 | 职责分离 | 官方计量器不决定使用哪个模型或何时压缩，超过阈值后的处理由调用方选择 |
+| [`packages/compaction/compaction-basic/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/compaction/compaction-basic/README.zh.md) | `compact` | 与官方一样使用 0.8 和 0.16 两个比例，检查摘要是否真正缩短，失败时保留原文；官方还会处理 KV 缓存重放 |
+| [`packages/compaction/compaction-tool-result-pruner/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/compaction/compaction-tool-result-pruner/README.zh.md) | `ToolResultPruner` | 与官方一样通过追加替换事件改变模型看到的内容，保留结果首尾并指向完整来源；教学版只处理纯文本 |
+| [`packages/spill/spill/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/spill/spill/README.zh.md) | `SpillPolicy`、`LocalSpillStore` | 与官方一样按字节限制结果大小，通过可替换的存储服务返回读取位置，保存失败时保留原文；教学版只实现本地文本文件 |
 
 ## 练习
 
-1. **阈值实验。** 把 CONTEXT_WINDOW 改成 20000，压力只有 20%，观察压缩不再触发；解释阈值判定在 Agent 循环里的位置。
-2. **retain 实验。** 把 retain_ratio 改成 0.4，观察被压缩区变小、保留原文变多、token 节省变少，体会省 token 与保细节的权衡。
-3. **剪枝可回放。** 构造一个超过阈值的 `tool/result`，运行两次 `prune_session()`。确认第一次追加 replacement、第二次不重复追加，并证明原事件正文仍可从 events 中读取。
-4. **spill 字节边界。** 用中英文和 emoji 混合文本测试 100 byte 上限，确认预览不会截断 UTF-8 字符；再让假 store 抛异常，验证工具原文不丢失。
-5. **幂等性。** 对已压缩过的历史再压一次，观察第二次压缩的输入里 `<compacted-summary>` 块去哪了。它成了被压缩区的一部分，官方压缩指令的 Rules 一节专门要求合并旧 checkpoint，读一遍那段指令。
+1. 结果裁剪、外部存储和摘要压缩都会减少模型看到的内容，但作用时机与信息损失不同。请为“超长网页刚被抓取”“旧日志中已有巨大工具结果”“长对话即将超过窗口”分别选择机制并说明理由。
+2. 为一个代码库分析智能体设计上下文预算。哪些内容必须保留原文，哪些可以只留首尾预览，哪些适合摘要？说明窗口压力、可恢复性和调用成本之间的取舍。
+3. 摘要可能遗漏用户约束或把不确定信息写成事实。你会如何验证摘要质量，并在摘要没有缩小、内容可疑或模型调用失败时安全回退？
+4. 以每 4 个字符估算 token 对英文、中文和大型 JSON schema 的误差并不相同。讨论启发式计量仍然有用的原因，以及服务商返回 context overflow 时还需要怎样的补救路径。
+5. 构造一个包含普通对话和大型工具结果的长会话，依次接入计量、结果裁剪、外部存储与摘要压缩。报告处理前后的压力、模型可见内容和完整原文位置，证明节省上下文没有破坏回放与按需读取。

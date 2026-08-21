@@ -4,10 +4,10 @@
 
 第 02 章的 calculator 是一个纯函数工具：接收参数、返回结果，不修改外部环境。文件工具则会读取和改写真实代码库，因此需要额外处理两个问题：
 
-1. 边界。Agent 能写哪些文件？一个 bug 或一次恶意诱导，模型的 write 调用会不会把用户家目录删了？
-2. 并发。Agent 读到文件内容后、写回之前，用户自己改了同一个文件，Agent 一写就把用户的新改动覆盖了，怎么办？
+1. 边界。智能体能写哪些文件？代码缺陷或恶意提示会不会让它修改工作区之外的内容？
+2. 并发。智能体读取文件后、写回之前，用户自己修改了同一个文件，怎样避免覆盖用户的新内容？
 
-官方用三个包回答这两个问题：tool-fs 工具层、fs-sandbox 围栏、fs-observation-policy 观察策略。本章把它们合并成一套教学实现：五个文件工具、一个沙箱围栏、一个读后写观察器。
+本章把文件操作分成三部分：五个基础文件工具、一条限制写入范围的路径围栏，以及一个防止覆盖新修改的读后写检查器。它们在官方源码中属于三个独立模块，章末会给出对应位置。
 
 ## 学习目标
 
@@ -18,9 +18,9 @@
 - 用读后写检查发现未读取文件和过期版本；
 - 实现 read、write、edit、grep 与 glob 这组基础文件工具。
 
-## 10.1 原理：两个问题的官方答案
+## 10.1 两道保护：限制范围，检查变化
 
-边界问题的答案是三模式沙箱。官方把文件写效应分成三档：
+第一道保护是三种文件访问模式：
 
 | 模式 | 能写哪里 |
 |------|----------|
@@ -30,7 +30,7 @@
 
 这里有两个要点。第一，策略主要约束写操作；读取不会修改文件系统，写入则可能覆盖或删除数据。第二，workspace-write 的可写集合包含工作区和临时目录，因为程序经常需要在 `/tmp` 等位置保存中间产物。
 
-并发问题的答案是读后写观察策略。官方要求模型写已存在的文件前必须先读过它，并在读的时候记录文件状态，写之前核对状态没变，这就是 CAS，compare-and-swap，比较后交换。两道门：没读过就写，以 FS_NOT_OBSERVED 拒绝；读过但文件已被外部改动，以 FS_STALE_VERSION 拒绝，要求重新读。这模拟了工程师的真实工作流：改代码前先看代码，别人动过的代码重新看一遍再改。
+第二道保护是读后写检查。程序要求智能体在修改已有文件前先读取它，并在读取时记录文件状态；真正写入前，再确认文件没有被其他程序修改。这种“先记录旧值，写入前再比较”的方法称为 CAS（compare-and-swap）。没有读过就写时返回 `FS_NOT_OBSERVED`；读过以后文件又发生变化时返回 `FS_STALE_VERSION`，要求重新读取。这与人工修改代码的习惯一致：先查看当前内容，发现别人改过后再重新确认。
 
 ## 10.2 沙箱围栏：fence_write
 
@@ -73,7 +73,7 @@ class SandboxPolicy:
 
 1. `target.resolve()` 先得到规范化后的真实路径。`workspace/../etc/passwd` 在原始字符串中带有工作区前缀，但规范化后已经位于工作区之外；指向工作区外的符号链接也会被解析到真实目标。官方同样要求在委托前再次规范化路径，以发现工具解析后发生变化的祖先符号链接。
 2. `relative_to` 判断包含关系：解析后的目标必须在某个可写根之下。抛 ValueError 表示不在其下，换下一个根；全部试完仍不在，拒绝。
-3. 拒绝要响亮且结构化：`SandboxDeniedError` 携带模式信息，格式对齐官方的模型可见标记 `[sandbox: file access denied under <mode> mode]`。模型读到这个错误能立刻理解这是权限问题，下一轮换条路。官方文档写明拒绝是结构化 FsError，不靠 stderr 文本推断。
+3. 拒绝结果要明确并带有结构：`SandboxDeniedError` 会记录当前模式，并生成模型能够识别的标记 `[sandbox: file access denied under <mode> mode]`。模型由此可以判断失败来自权限限制，而不是根据零散的错误输出猜测原因。
 
 这里需要明确能力边界：路径围栏是一项约束，不是内核级安全隔离。它能够阻止模型误写工作区之外的路径，但不能抵御恶意代码主动绕过。第 11 章会进一步说明 shell 命令所需的内核级隔离。
 
@@ -105,7 +105,7 @@ class ObservationTracker:
 
 - 观察记录使用 mtime 快照：读文件时记下修改时间，写入前再次比较。mtime 的实际时间分辨率取决于文件系统；如果两次修改间隔过短，记录值可能不变，因此 demo 在模拟外部修改前短暂等待。
 - 键用 `resolve()` 规范化。macOS 上 `/var` 是指向 `/private/var` 的符号链接，读时记的键和写时查的键若不统一，会出现明明读过却报没读的假阴性。
-- 两道门都只防无意的覆盖。CAS 的语义是比较后交换：读完作为比较基准，之后写完之前世界没变才放行，变了就要求重新读。成功写入后观察器会记录新版本，因此同一 Agent 后续写入仍有新鲜基准。这是并发编辑的最小防御，不是文件锁。
+- 两道检查主要防止无意覆盖。读取时保存的状态是比较基准，写入前文件没有变化才放行；发生变化就要求重新读取。成功写入后，观察器会记录新版本，因此同一智能体后续写入仍有新的比较基准。这是并发编辑的基本保护，不等同于文件锁。
 
 ## 10.4 五个文件工具
 
@@ -196,14 +196,14 @@ todo.txt
 
 七部分输出覆盖了文件工具的一条完整路径。拒绝信息同时给出修正方向：文件未读取时先读；匹配不唯一时提供更具体的文本；文件已变化时重新读取；路径越界时改用允许的位置。
 
-## 10.6 进入 Capstone
+## 10.6 在第 17 章中的使用方式
 
-第 17 章注册 `read`、`write`、`edit`、`grep` 和 `glob` 五个模型工具。它们共享进程工作目录、SandboxPolicy 与 ObservationTracker；Prompt 同时告诉模型 workspace root、当前写模式和“现有文件必须先读后写”。因此本章不只是一组独立函数，路径围栏与观察状态会贯穿同一个 Agent Session。
+第 17 章会把 `read`、`write`、`edit`、`grep` 和 `glob` 注册成五个模型工具。它们共享当前工作目录、`SandboxPolicy` 和 `ObservationTracker`。系统提示词也会告诉模型工作区位置、当前写入模式，以及“修改已有文件前必须先读取”的规则。因此，路径围栏和文件观察状态会在同一个智能体会话中持续生效。
 
 ## 本章小结
 
 - `SandboxPolicy.fence_write`：三模式、可写根集合、resolve 规范化、结构化拒绝
-- `ObservationTracker`：读记 mtime、写前 CAS 双门
+- `ObservationTracker`：读取时记录修改时间，写入前检查文件是否变化
 - 五个工具：read 带行号与页脚并记录观察，write 全量写入，edit 唯一匹配 str-replace，grep 搜内容，glob 找文件
 - 升级审批：严格更宽表
 
@@ -212,12 +212,12 @@ todo.txt
 | 官方实现 | 我们对应实现 | 说明 |
 |----------|--------------|------|
 | [`packages/fs/fs-sandbox/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/fs/fs-sandbox/README.zh.md) | `SandboxPolicy` | 对齐三种模式、可写根集合、“约束而非安全边界”的定位与结构化 FsError |
-| [`packages/fs/fs-observation-policy/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/fs/fs-observation-policy/README.zh.md) | `ObservationTracker` | 官方读后写 CAS 思想；官方经 fs 事件门禁实现，write-intent 与 observed 两类事件，教学版简化为 mtime 快照 |
-| [`packages/fs/tool-fs/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/fs/tool-fs/README.zh.md) | 五个工具函数 | 官方工具层还负责把 FsError 渲染成模型可见的 sandbox 标记 |
+| [`packages/fs/fs-observation-policy/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/fs/fs-observation-policy/README.zh.md) | `ObservationTracker` | 官方同样要求写入基于最近一次读取的版本，并通过文件事件记录写入意图和观察结果；教学版只比较修改时间 `mtime` |
+| [`packages/fs/tool-fs/README.zh.md`](https://github.com/deepseek-ai/DeepSeek-Harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/fs/tool-fs/README.zh.md) | 五个工具函数 | 官方工具层还会把 `FsError` 转换成模型可以理解的沙箱错误标记 |
 
 ## 练习
 
-1. **符号链接逃逸。** 在工作区内建一个指向家目录的符号链接，尝试经它写入，观察 resolve 如何识破；再把链接目标换成工作区内文件，对比结果。
-2. **read-only 模式。** 把 policy 换成 read-only，重跑 demo，观察哪些操作还能通过、哪些被拒，解释读永远放行的设计。
-3. **误报与漏报。** 观察器的 mtime 方案有两个已知弱点：同一纳秒内两次修改检测不到，这是漏报；touch 一下就会触发拒绝，这是误报。讨论官方用事件机制为什么能做得更准。
-4. **错误即指导。** 把 edit_file 的歧义报错信息改得含糊，只报失败两个字，再扮演模型尝试修正，体会错误信息质量对 Agent 自愈能力的影响。
+1. 为一个能修改代码库的智能体分析安全风险，至少考虑路径穿越、符号链接、覆盖用户新改动和过宽写权限。哪些风险由路径围栏解决，哪些还需要观察策略或人工审批？
+2. 文档问答、代码重构和系统运维三类智能体应分别使用哪种文件模式？说明为什么“能读但不能写”并不等于不存在隐私或数据泄露风险。
+3. 读后写检查可能因为外部格式化、时间戳精度或跨进程修改产生误报和漏报。比较 mtime、内容哈希和文件事件三种观察方式，并选择一种适合本教学项目的方案。
+4. 设计并实现一个新的安全文件操作，例如应用补丁或批量重命名。它必须复用工作区围栏和读后写检查，返回能指导智能体修正的结构化错误，并验证越界路径与过期版本不会被写入。
